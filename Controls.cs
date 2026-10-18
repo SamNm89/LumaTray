@@ -96,9 +96,16 @@ namespace LumaTray
             Invalidate();
         }
 
+        public event MouseEventHandler WheelScrolled;
+
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
+            if (WheelScrolled != null)
+            {
+                WheelScrolled(this, e);
+                return;
+            }
             int step = (e.Delta > 0) ? 5 : -5;
             Value += step;
         }
@@ -288,6 +295,18 @@ namespace LumaTray
             {
                 g.DrawString(Text, Font, textBrush, new RectangleF(0, 0, Width, Height), sf);
             }
+        }
+    }
+
+    public class DoubleBufferedPanel : Panel
+    {
+        public DoubleBufferedPanel()
+        {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.ResizeRedraw, true);
         }
     }
 }

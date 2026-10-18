@@ -25,6 +25,7 @@ I built this because I got fed up with Twinkle Tray sucking up 200 MB of RAM jus
 - **Windows 11 Fluent Design**:
   - Compact flyout that pops up right above your taskbar.
   - Automatically matches your Windows **Dark/Light Theme** and your personal **Windows Accent Color**.
+  - Dynamic height: expands naturally to fit up to 2 monitor blocks with zero scrollbars.
   - Closes automatically when clicking away or pressing <kbd>Esc</kbd>.
 - **Hardware DDC/CI & Laptop Screen Support**:
   - External HDMI / DisplayPort monitors via physical DDC/CI (`VCP 0x10`).
@@ -33,7 +34,7 @@ I built this because I got fed up with Twinkle Tray sucking up 200 MB of RAM jus
 - **Keyboard & Mouse Control**:
   - <kbd>←</kbd> / <kbd>→</kbd> : Nudge brightness down / up by 2% (or 5% with <kbd>Shift</kbd>).
   - <kbd>Tab</kbd> / <kbd>↑</kbd> / <kbd>↓</kbd> : Switch between monitors if you have multiple screens.
-  - Mouse wheel: Scroll anywhere over a slider to adjust.
+  - Mouse wheel: Adjust brightness directly (or smoothly scroll through 3+ displays without ugly scrollbars).
 - **Global Hotkeys & Floating OSD**:
   - <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>↑</kbd> : Increase brightness (+5%)
   - <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>↓</kbd> : Decrease brightness (-5%)

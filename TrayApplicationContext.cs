@@ -80,7 +80,7 @@ namespace LumaTray
             {
                 long mem = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
                 MessageBox.Show(
-                    "LumaTray v2.0 (Compact)\nUltra-lightweight monitor brightness controller for Windows.\n\n" +
+                    "LumaTray v1.0.1\nUltra-lightweight monitor brightness controller for Windows.\n\n" +
                     "• RAM usage: ~" + mem + " MB (vs 150-200MB in Electron)\n" +
                     "• Supports DDC/CI external monitors & WMI laptop screens\n" +
                     "• In-panel controls: Arrow keys (Left/Right to adjust, Up/Down/Tab to switch row)\n" +

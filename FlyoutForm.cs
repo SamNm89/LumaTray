@@ -10,15 +10,25 @@ namespace LumaTray
     public class FlyoutForm : Form
     {
         private readonly MonitorManager _manager;
-        private readonly FlowLayoutPanel _cardPanel;
+        private readonly DoubleBufferedPanel _cardsViewport;
+        private readonly DoubleBufferedPanel _cardsContainer;
         private readonly Label _titleLabel;
         private readonly Label _countBadge;
+        private readonly Label _tipLabel;
         private readonly ModernIconButton _btnLink;
         private readonly ModernIconButton _btnSettings;
         private readonly List<MonitorRowCard> _cards = new List<MonitorRowCard>();
-        private int _focusedIndex = 0;
+        private readonly Timer _scrollAnimTimer;
 
+        private int _focusedIndex = 0;
+        private int _scrollIndex = 0;
+        private int _targetScrollTop = 0;
         private bool _isLinked = false;
+
+        public bool CanScrollCards
+        {
+            get { return _cards.Count > 2; }
+        }
 
         public bool IsLinked
         {
@@ -46,6 +56,9 @@ namespace LumaTray
             TopMost = true;
             DoubleBuffered = true;
             Width = 304;
+
+            _scrollAnimTimer = new Timer { Interval = 15 };
+            _scrollAnimTimer.Tick += ScrollAnimTimer_Tick;
 
             ApplyTheme();
 
@@ -104,27 +117,16 @@ namespace LumaTray
             headerPanel.Controls.Add(_btnLink);
             headerPanel.Controls.Add(_btnSettings);
 
-            // Container for monitor rows
-            _cardPanel = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                FlowDirection = FlowDirection.TopDown,
-                WrapContents = false,
-                AutoScroll = true,
-                BackColor = Color.Transparent,
-                Padding = new Padding(6, 2, 6, 2)
-            };
-
-            // Ultra-slim micro footer (18px)
+            // Footer Panel (22px)
             Panel footerPanel = new Panel
             {
                 Dock = DockStyle.Bottom,
-                Height = 18,
+                Height = 22,
                 BackColor = Color.Transparent,
                 Padding = new Padding(8, 0, 8, 2)
             };
 
-            Label tipLabel = new Label
+            _tipLabel = new Label
             {
                 Text = "← → or scroll to adjust • Esc to close",
                 Font = new Font("Segoe UI", 7.5f, FontStyle.Regular),
@@ -132,11 +134,43 @@ namespace LumaTray
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleCenter
             };
-            footerPanel.Controls.Add(tipLabel);
+            footerPanel.Controls.Add(_tipLabel);
 
-            Controls.Add(_cardPanel);
+            // Scrollbar-free Viewport Panel
+            _cardsViewport = new DoubleBufferedPanel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.Transparent,
+                AutoScroll = false
+            };
+
+            // Internal Cards Container Panel (moves vertically within Viewport)
+            _cardsContainer = new DoubleBufferedPanel
+            {
+                Location = new Point(0, 0),
+                Width = Width,
+                BackColor = Color.Transparent,
+                AutoScroll = false
+            };
+            _cardsViewport.Controls.Add(_cardsContainer);
+
+            // Add docked controls
+            Controls.Add(_cardsViewport);
             Controls.Add(footerPanel);
             Controls.Add(headerPanel);
+            headerPanel.SendToBack();
+            footerPanel.SendToBack();
+            _cardsViewport.BringToFront();
+
+            // Mouse wheel forwarding to scroll monitors when >2
+            MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
+            headerPanel.MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
+            _titleLabel.MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
+            _countBadge.MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
+            footerPanel.MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
+            _tipLabel.MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
+            _cardsViewport.MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
+            _cardsContainer.MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
 
             _manager.MonitorsRefreshed += OnMonitorsRefreshed;
             BuildMonitorCards();
@@ -148,6 +182,7 @@ namespace LumaTray
             ForeColor = ThemeManager.TextColor;
             if (_titleLabel != null) _titleLabel.ForeColor = ThemeManager.TextColor;
             if (_countBadge != null) _countBadge.ForeColor = ThemeManager.DimTextColor;
+            if (_tipLabel != null) _tipLabel.ForeColor = ThemeManager.DimTextColor;
 
             foreach (var card in _cards)
             {
@@ -198,16 +233,23 @@ namespace LumaTray
                 return;
             }
             BuildMonitorCards();
+            if (Visible)
+            {
+                PositionNearTray();
+            }
         }
 
         private void BuildMonitorCards()
         {
-            _cardPanel.SuspendLayout();
-            _cardPanel.Controls.Clear();
+            _scrollAnimTimer.Stop();
+            _cardsContainer.SuspendLayout();
+            _cardsContainer.Controls.Clear();
             _cards.Clear();
+            _scrollIndex = 0;
+            _targetScrollTop = 0;
+            _cardsContainer.Top = 0;
 
             var monitors = _manager.GetMonitors();
-            _countBadge.Text = monitors.Count == 1 ? "1 Display" : monitors.Count + " Displays";
 
             if (monitors.Count == 0)
             {
@@ -219,28 +261,156 @@ namespace LumaTray
                     AutoSize = false,
                     Size = new Size(Width - 32, 60),
                     TextAlign = ContentAlignment.MiddleCenter,
-                    Margin = new Padding(8, 10, 8, 8)
+                    Location = new Point(16, 4)
                 };
-                _cardPanel.Controls.Add(emptyLabel);
-                Height = 120;
+                _cardsContainer.Controls.Add(emptyLabel);
+                _cardsContainer.Height = 60;
+                Height = 34 + 60 + 22; // 116
             }
             else
             {
-                int totalHeight = 34 + 18 + 6;
+                int cardWidth = Width - 20; // 304 - 20 = 284
+                int cardHeight = 52;
+                int cardGap = 6;
+                int topPadding = 4;
+
                 for (int i = 0; i < monitors.Count; i++)
                 {
                     var mon = monitors[i];
                     MonitorRowCard card = new MonitorRowCard(mon, _manager, this, i);
-                    card.Width = Width - 16;
+                    card.Location = new Point(10, topPadding + (i * (cardHeight + cardGap)));
+                    card.Size = new Size(cardWidth, cardHeight);
                     _cards.Add(card);
-                    _cardPanel.Controls.Add(card);
-                    totalHeight += card.Height + 2;
+                    _cardsContainer.Controls.Add(card);
                 }
-                Height = Math.Min(480, totalHeight);
-                _focusedIndex = 0;
+
+                int totalContentHeight = topPadding + (monitors.Count * (cardHeight + cardGap)) + 4;
+                _cardsContainer.Height = totalContentHeight;
+
+                if (monitors.Count == 1)
+                {
+                    // 1 block tall
+                    Height = 34 + (topPadding + cardHeight + 4) + 22; // 116
+                }
+                else
+                {
+                    // 2 blocks tall (up to 2 cards natively visible, max height!)
+                    Height = 34 + (topPadding + (2 * cardHeight) + cardGap + 4) + 22; // 174
+                }
             }
 
-            _cardPanel.ResumeLayout(true);
+            _cardsContainer.ResumeLayout(true);
+            _focusedIndex = 0;
+            UpdateFocusVisual();
+            UpdateBadgeAndTip();
+        }
+
+        private void ScrollAnimTimer_Tick(object sender, EventArgs e)
+        {
+            int current = _cardsContainer.Top;
+            int diff = _targetScrollTop - current;
+
+            if (Math.Abs(diff) <= 3)
+            {
+                _cardsContainer.Top = _targetScrollTop;
+                _scrollAnimTimer.Stop();
+            }
+            else
+            {
+                _cardsContainer.Top = current + (diff / 2);
+            }
+        }
+
+        public void HandleFlyoutMouseWheel(MouseEventArgs e)
+        {
+            if (!CanScrollCards) return;
+
+            int maxIndex = Math.Max(0, _cards.Count - 2);
+            if (e.Delta < 0)
+            {
+                // Wheel down -> scroll down (reveal next displays)
+                if (_scrollIndex < maxIndex)
+                {
+                    _scrollIndex++;
+                    AnimateScrollToTarget();
+                }
+            }
+            else if (e.Delta > 0)
+            {
+                // Wheel up -> scroll up (reveal previous displays)
+                if (_scrollIndex > 0)
+                {
+                    _scrollIndex--;
+                    AnimateScrollToTarget();
+                }
+            }
+        }
+
+        private void AnimateScrollToTarget()
+        {
+            _targetScrollTop = -(_scrollIndex * 58);
+            _scrollAnimTimer.Start();
+            UpdateBadgeAndTip();
+        }
+
+        private void UpdateBadgeAndTip()
+        {
+            int count = _cards.Count;
+            if (count == 0)
+            {
+                _countBadge.Text = "0 Displays";
+                _tipLabel.Text = "Esc to close";
+            }
+            else if (count == 1)
+            {
+                _countBadge.Text = "1 Display";
+                _tipLabel.Text = "← → or scroll to adjust • Esc to close";
+            }
+            else if (count == 2)
+            {
+                _countBadge.Text = "2 Displays";
+                _tipLabel.Text = "← → or scroll to adjust • Esc to close";
+            }
+            else
+            {
+                int first = _scrollIndex + 1;
+                int last = Math.Min(_scrollIndex + 2, count);
+                _countBadge.Text = string.Format("Displays {0}-{1} of {2}", first, last, count);
+                _tipLabel.Text = "Scroll or ↑↓ to view all • Esc to close";
+            }
+        }
+
+        public void SetFocusedCardIndex(int index)
+        {
+            if (index >= 0 && index < _cards.Count)
+            {
+                _focusedIndex = index;
+                UpdateFocusVisual();
+            }
+        }
+
+        private void UpdateFocusVisual()
+        {
+            for (int i = 0; i < _cards.Count; i++)
+            {
+                _cards[i].IsCardFocused = (i == _focusedIndex && _cards.Count > 1);
+            }
+        }
+
+        private void EnsureCardVisible(int index)
+        {
+            if (!CanScrollCards) return;
+
+            if (index < _scrollIndex)
+            {
+                _scrollIndex = index;
+                AnimateScrollToTarget();
+            }
+            else if (index >= _scrollIndex + 2)
+            {
+                _scrollIndex = index - 1;
+                AnimateScrollToTarget();
+            }
         }
 
         public void NotifyCardSliderChanged(MonitorInfo sourceMonitor, int delta)
@@ -273,10 +443,16 @@ namespace LumaTray
         {
             ApplyTheme();
             SyncCardsFromMonitors();
+            _scrollIndex = 0;
+            _targetScrollTop = 0;
+            _scrollAnimTimer.Stop();
+            _cardsContainer.Top = 0;
+            _focusedIndex = 0;
+            UpdateFocusVisual();
+            UpdateBadgeAndTip();
             PositionNearTray();
             Show();
             NativeMethods.SetForegroundWindow(Handle);
-            _focusedIndex = 0;
         }
 
         public void ToggleVisibility()
@@ -356,6 +532,8 @@ namespace LumaTray
                     if (_cards.Count > 1)
                     {
                         _focusedIndex = (_focusedIndex + 1) % _cards.Count;
+                        EnsureCardVisible(_focusedIndex);
+                        UpdateFocusVisual();
                     }
                     else
                     {
@@ -368,6 +546,8 @@ namespace LumaTray
                     if (_cards.Count > 1)
                     {
                         _focusedIndex = (_focusedIndex - 1 + _cards.Count) % _cards.Count;
+                        EnsureCardVisible(_focusedIndex);
+                        UpdateFocusVisual();
                     }
                     else
                     {
@@ -380,6 +560,8 @@ namespace LumaTray
                     if (_cards.Count > 1)
                     {
                         _focusedIndex = (_focusedIndex + 1) % _cards.Count;
+                        EnsureCardVisible(_focusedIndex);
+                        UpdateFocusVisual();
                     }
                     return true;
                 }
@@ -390,6 +572,7 @@ namespace LumaTray
 
         public void HideAndTrim()
         {
+            _scrollAnimTimer.Stop();
             Hide();
             try
             {
@@ -398,25 +581,56 @@ namespace LumaTray
             }
             catch { }
         }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (_scrollAnimTimer != null)
+                {
+                    _scrollAnimTimer.Stop();
+                    _scrollAnimTimer.Dispose();
+                }
+            }
+            base.Dispose(disposing);
+        }
     }
 
     public class MonitorRowCard : Panel
     {
         public MonitorInfo Monitor { get; private set; }
         public ModernSlider Slider { get { return _slider; } }
+        public Label TitleLabel { get { return _titleLabel; } }
+        public Label PctLabel { get { return _pctLabel; } }
 
         private readonly MonitorManager _manager;
         private readonly FlyoutForm _parentFlyout;
         private readonly ModernSlider _slider;
         private readonly Label _titleLabel;
         private readonly Label _pctLabel;
+        private readonly int _index;
         private int _lastValue;
+        private bool _isCardFocused = false;
+
+        public bool IsCardFocused
+        {
+            get { return _isCardFocused; }
+            set
+            {
+                if (_isCardFocused != value)
+                {
+                    _isCardFocused = value;
+                    Invalidate();
+                }
+            }
+        }
 
         public MonitorRowCard(MonitorInfo monitor, MonitorManager manager, FlyoutForm parentFlyout, int index)
         {
             Monitor = monitor;
             _manager = manager;
             _parentFlyout = parentFlyout;
+            _index = index;
             _lastValue = monitor.CurrentBrightness;
 
             Height = 52;
@@ -424,7 +638,7 @@ namespace LumaTray
             Padding = new Padding(0);
             DoubleBuffered = true;
 
-            // Monitor Title
+            // Monitor Title (with ellipsis protection so long names never clip percentage)
             _titleLabel = new Label
             {
                 Text = monitor.FriendlyName,
@@ -432,6 +646,8 @@ namespace LumaTray
                 ForeColor = ThemeManager.TextColor,
                 Location = new Point(28, 4),
                 AutoSize = true,
+                MaximumSize = new Size(Width - 88, 20),
+                AutoEllipsis = true,
                 BackColor = Color.Transparent
             };
 
@@ -465,10 +681,17 @@ namespace LumaTray
             Controls.Add(_pctLabel);
             Controls.Add(_slider);
 
-            // Mouse wheel adjustments
-            MouseWheel += OnCardMouseWheel;
-            _titleLabel.MouseWheel += OnCardMouseWheel;
-            _pctLabel.MouseWheel += OnCardMouseWheel;
+            // Forward mouse wheel appropriately
+            MouseWheel += (s, e) => OnCardMouseWheel(e);
+            _titleLabel.MouseWheel += (s, e) => OnCardMouseWheel(e);
+            _pctLabel.MouseWheel += (s, e) => OnCardMouseWheel(e);
+            _slider.WheelScrolled += (s, e) => OnCardMouseWheel(e);
+
+            // Focus on click
+            MouseDown += (s, e) => _parentFlyout.SetFocusedCardIndex(_index);
+            _titleLabel.MouseDown += (s, e) => _parentFlyout.SetFocusedCardIndex(_index);
+            _pctLabel.MouseDown += (s, e) => _parentFlyout.SetFocusedCardIndex(_index);
+            _slider.MouseDown += (s, e) => _parentFlyout.SetFocusedCardIndex(_index);
         }
 
         public void ApplyTheme()
@@ -481,17 +704,25 @@ namespace LumaTray
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (_pctLabel != null && _slider != null)
+            if (_pctLabel != null && _slider != null && _titleLabel != null)
             {
+                _titleLabel.MaximumSize = new Size(Width - 88, 20);
                 _pctLabel.Location = new Point(Width - 54, 3);
                 _slider.Size = new Size(Width, 26);
             }
         }
 
-        private void OnCardMouseWheel(object sender, MouseEventArgs e)
+        private void OnCardMouseWheel(MouseEventArgs e)
         {
-            int step = (e.Delta > 0) ? 5 : -5;
-            AdjustBrightness(step);
+            if (_parentFlyout.CanScrollCards && (ModifierKeys & Keys.Control) == 0)
+            {
+                _parentFlyout.HandleFlyoutMouseWheel(e);
+            }
+            else
+            {
+                int step = (e.Delta > 0) ? 5 : -5;
+                AdjustBrightness(step);
+            }
         }
 
         public void AdjustBrightness(int delta)
@@ -529,6 +760,16 @@ namespace LumaTray
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            // Accent focus pill on the left border if focused
+            if (_isCardFocused)
+            {
+                using (GraphicsPath pillPath = ModernSlider.CreateRoundedRect(new Rectangle(2, 9, 3, 34), 1))
+                using (SolidBrush pillBrush = new SolidBrush(ThemeManager.AccentColor))
+                {
+                    g.FillPath(pillBrush, pillPath);
+                }
+            }
 
             // Crisp mini vector monitor icon
             using (Pen iconPen = new Pen(ThemeManager.AccentColor, 1.4f))
