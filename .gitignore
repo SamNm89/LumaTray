@@ -1,0 +1,14 @@
+# Binaries
+*.exe
+*.dll
+*.pdb
+
+# Temporary test / diagnostic scripts
+*.log
+*.tmp
+
+# Visual Studio / VS Code
+.vs/
+.vscode/
+*.suo
+*.user
