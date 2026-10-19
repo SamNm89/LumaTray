@@ -84,12 +84,20 @@ namespace LumaTray
             {
                 try
                 {
-                    using (var key = Registry.CurrentUser.OpenSubKey(RootKey, false))
+                    using (var key = Registry.CurrentUser.OpenSubKey(RootKey, true))
                     {
                         if (key != null)
                         {
                             string s = key.GetValue("CachedPatchNotes") as string;
-                            if (!string.IsNullOrEmpty(s)) return s;
+                            if (!string.IsNullOrEmpty(s))
+                            {
+                                if (IsCorruptedOrRaw(s))
+                                {
+                                    try { key.DeleteValue("CachedPatchNotes", false); } catch { }
+                                    return DefaultPatchNotes;
+                                }
+                                return s;
+                            }
                         }
                     }
                 }
@@ -113,17 +121,30 @@ namespace LumaTray
             }
         }
 
+        private static bool IsCorruptedOrRaw(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return true;
+            foreach (char c in s)
+            {
+                if (c == '\uFFFD' || c == 0x00F0 || c == 0x0178 || (c >= 0x0080 && c <= 0x009F))
+                    return true;
+            }
+            if (s.StartsWith("##") || s.Contains("<kbd>"))
+                return true;
+            return false;
+        }
+
         public static string DefaultPatchNotes
         {
             get
             {
-                return "Recent Patch Notes (v1.0.2):\n" +
-                       "• Hardened Auto-Updater: SHA-256 checksum verification & resilient swap script.\n" +
-                       "• Debounced Brightness Persistence: Background thread saves with zero UI drag latency.\n" +
-                       "• Unique Monitor Hardware Keys: EDID serial & DeviceID tracking prevents multi-monitor collisions.\n" +
-                       "• Optimized Card Lifecycle: Skips UI card teardown when display configuration is unchanged.\n" +
-                       "• Network Timeout & Cancel: 15-second updater timeout with interactive cancel dialog.\n" +
-                       "• Dynamic Window Height & Wheel Scroll: Fits up to 2 screens natively and scrolls 3+.";
+                return "Recent Changes (v1.0.2):\n" +
+                       "• Hardened Auto-Updater: SHA-256 verification & resilient atomic swap.\n" +
+                       "• Debounced Brightness Persistence: Background thread saves with zero UI lag.\n" +
+                       "• Unique Monitor Hardware Keys: EDID serial & DeviceID tracking.\n" +
+                       "• Optimized Card Lifecycle: Skips UI card teardown when displays unchanged.\n" +
+                       "• Fast Network & Cancel: Instant proxy-free queries with interactive dialog.\n" +
+                       "• Dynamic Window Height & Wheel Scroll: Fits up to 2 screens & scrolls 3+.";
             }
         }
 

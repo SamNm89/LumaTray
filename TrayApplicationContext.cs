@@ -102,14 +102,14 @@ namespace LumaTray
                 string aboutText = string.Format(
                     "LumaTray v{0}\n" +
                     "Ultra-lightweight monitor brightness controller for Windows.\n\n" +
-                    "• RAM: ~{1} MB working set ({2} MB private commit vs 150-200MB in Electron)\n" +
+                    "• RAM: ~{1} MB working set ({2} MB private commit vs 150-200 MB in Electron)\n" +
                     "• True asynchronous DDC/CI hardware I/O & leak-free WMI\n" +
                     "• External HDMI/DP monitors (DDC/CI) & laptop screens (WMI)\n" +
                     "• In-panel controls: Arrow keys & mouse wheel navigation\n" +
                     "• Hotkeys: Ctrl+Alt+Up (increase), Ctrl+Alt+Down (decrease)\n" +
                     "• Dynamic auto-sizing flyout & smooth wheel scroll for 3+ screens\n" +
                     "• Live Windows Dark/Light theme & Accent Color sync\n\n" +
-                    "────────────────────────────────────────\n" +
+                    "--------------------------------------------------\n" +
                     "{3}",
                     UpdateManager.CurrentVersion.ToString(3),
                     ws, priv, notes);
@@ -295,10 +295,20 @@ namespace LumaTray
 
         private void CheckForUpdatesManual()
         {
+            _trayIcon.Text = "LumaTray (Checking for updates...)";
+
             UpdateManager.CheckForUpdatesAsync(true, delegate(bool found, UpdateInfo update, string error)
             {
                 _msgWindow.BeginInvoke(new Action(delegate
                 {
+                    UpdateTrayTooltip();
+
+                    if (error == "ALREADY_CHECKING")
+                    {
+                        // Ignore spam clicks while check is actively in flight
+                        return;
+                    }
+
                     if (found && update != null)
                     {
                         _hasUpdateBadge = true;
@@ -312,7 +322,7 @@ namespace LumaTray
                     }
                     else
                     {
-                        MessageBox.Show("You are running the latest version of LumaTray (v" + UpdateManager.CurrentVersion.ToString(3) + ")!", "LumaTray", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show("You are running the latest version of LumaTray (v" + UpdateManager.CurrentVersion.ToString(3) + ")!\n\nNo updates are currently available.", "LumaTray", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                 }));
             });

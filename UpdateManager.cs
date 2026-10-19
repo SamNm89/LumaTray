@@ -18,6 +18,8 @@ namespace LumaTray
         public TimeoutWebClient(int timeoutMs = 15000)
         {
             TimeoutMs = timeoutMs;
+            Encoding = Encoding.UTF8;
+            Proxy = null;
         }
 
         protected override WebRequest GetWebRequest(Uri uri)
@@ -26,6 +28,7 @@ namespace LumaTray
             if (w != null)
             {
                 w.Timeout = TimeoutMs;
+                w.Proxy = null;
                 if (w is HttpWebRequest)
                 {
                     ((HttpWebRequest)w).ReadWriteTimeout = TimeoutMs;
@@ -71,8 +74,19 @@ namespace LumaTray
             }
         }
 
+        private static int _isChecking = 0;
+
         public static void CheckForUpdatesAsync(bool isManual, Action<bool, UpdateInfo, string> onCompleted = null)
         {
+            if (Interlocked.CompareExchange(ref _isChecking, 1, 0) != 0)
+            {
+                if (isManual && onCompleted != null)
+                {
+                    onCompleted(false, null, "ALREADY_CHECKING");
+                }
+                return;
+            }
+
             ThreadPool.QueueUserWorkItem(delegate
             {
                 try
@@ -80,7 +94,7 @@ namespace LumaTray
                     ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                     string json;
 
-                    using (var client = new TimeoutWebClient(15000))
+                    using (var client = new TimeoutWebClient(10000))
                     {
                         client.Headers.Add("User-Agent", "LumaTray-App");
                         json = client.DownloadString(GitHubApiLatest);
@@ -93,10 +107,15 @@ namespace LumaTray
                     string checksumUrl = MatchValue(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]*(?:\\.sha256|checksums\\.txt))\"");
                     string rawBody = MatchValue(json, "\"body\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
 
-                    string patchNotes = UnescapeString(rawBody);
+                    string rawNotes = UnescapeString(rawBody);
+                    string patchNotes = CleanPatchNotes(rawNotes);
                     if (!string.IsNullOrEmpty(patchNotes))
                     {
                         SettingsManager.CachedPatchNotes = patchNotes;
+                    }
+                    else
+                    {
+                        patchNotes = SettingsManager.DefaultPatchNotes;
                     }
 
                     // 1. GitHub asset digest ("digest":"sha256:...") specifically for LumaTray.exe
@@ -160,6 +179,10 @@ namespace LumaTray
                     {
                         onCompleted(false, null, ex.Message);
                     }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _isChecking, 0);
                 }
             });
         }
@@ -452,6 +475,63 @@ namespace LumaTray
             {
                 return input.Replace("\\r\\n", "\r\n").Replace("\\n", "\n").Replace("\\\"", "\"").Replace("\\\\", "\\");
             }
+        }
+
+        public static string CleanPatchNotes(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return "";
+
+            // Purge corrupt ANSI mojibake from older builds
+            if (input.Contains("dY") || input.Contains("\uFFFD") || input.Contains("~?"))
+            {
+                return "";
+            }
+
+            string[] lines = input.Replace("\r\n", "\n").Split('\n');
+            StringBuilder sb = new StringBuilder();
+            bool inDownload = false;
+
+            foreach (string rawLine in lines)
+            {
+                string line = rawLine.Trim();
+                if (string.IsNullOrEmpty(line)) continue;
+
+                if (line.IndexOf("Download", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    line.IndexOf("Requirements", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    inDownload = true;
+                    continue;
+                }
+                if (inDownload) continue;
+                if (line.StartsWith("---") || line.StartsWith("===")) continue;
+
+                bool isBullet = line.StartsWith("*") || line.StartsWith("-");
+                bool isHeader = line.StartsWith("#");
+
+                line = Regex.Replace(line, @"^#+\s*", "");
+                line = Regex.Replace(line, @"^[\*\-\?]+\s*", "");
+                line = Regex.Replace(line, @"\?{2,}", "");
+                line = line.Replace("**", "").Replace("`", "");
+                line = Regex.Replace(line, @"<[^>]+>", "");
+                line = line.Trim();
+                if (string.IsNullOrEmpty(line)) continue;
+
+                if (isHeader)
+                {
+                    if (sb.Length > 0) sb.AppendLine();
+                    sb.AppendLine(line);
+                }
+                else if (isBullet)
+                {
+                    sb.AppendLine("• " + line);
+                }
+                else
+                {
+                    sb.AppendLine(line);
+                }
+            }
+
+            return sb.ToString().Trim();
         }
 
         private static string ExtractAssetBlock(string json, string filename)
