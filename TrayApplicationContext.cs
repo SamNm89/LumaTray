@@ -16,6 +16,7 @@ namespace LumaTray
         private readonly OsdForm _osd;
         private readonly HotkeyMessageWindow _msgWindow;
 
+        private Icon _currentTrayIcon;
         private MenuItem _menuItemLink;
         private MenuItem _menuItemHotkeys;
         private MenuItem _menuItemStartup;
@@ -58,7 +59,6 @@ namespace LumaTray
             {
                 ToggleHotkeys();
             });
-            _menuItemHotkeys.Checked = true;
             menu.MenuItems.Add(_menuItemHotkeys);
 
             _menuItemStartup = new MenuItem("Start with Windows", delegate
@@ -78,14 +78,17 @@ namespace LumaTray
 
             MenuItem itemAbout = new MenuItem("About LumaTray...", delegate
             {
-                long mem = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
+                long ws = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
+                long priv = Process.GetCurrentProcess().PrivateMemorySize64 / (1024 * 1024);
                 MessageBox.Show(
                     "LumaTray v1.0.1\nUltra-lightweight monitor brightness controller for Windows.\n\n" +
-                    "• RAM usage: ~" + mem + " MB (vs 150-200MB in Electron)\n" +
-                    "• Supports DDC/CI external monitors & WMI laptop screens\n" +
-                    "• In-panel controls: Arrow keys (Left/Right to adjust, Up/Down/Tab to switch row)\n" +
+                    "• RAM: ~" + ws + " MB working set (" + priv + " MB private commit vs 150-200MB in Electron)\n" +
+                    "• True asynchronous DDC/CI hardware I/O & leak-free WMI\n" +
+                    "• External HDMI/DP monitors (DDC/CI) & laptop screens (WMI)\n" +
+                    "• In-panel controls: Arrow keys (Left/Right adjust, Up/Down/Tab switch row)\n" +
                     "• Hotkeys: Ctrl+Alt+Up (increase), Ctrl+Alt+Down (decrease)\n" +
-                    "• Automatic Windows Dark/Light theme & Accent Color sync",
+                    "• Dynamic auto-sizing flyout & smooth wheel scroll for 3+ screens\n" +
+                    "• Live Windows Dark/Light theme & Accent Color sync",
                     "About LumaTray",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -96,9 +99,10 @@ namespace LumaTray
             menu.MenuItems.Add(itemExit);
 
             // Initialize Tray Icon
+            _currentTrayIcon = CreateTrayIcon();
             _trayIcon = new NotifyIcon
             {
-                Icon = CreateTrayIcon(),
+                Icon = _currentTrayIcon,
                 ContextMenu = menu,
                 Visible = true,
                 Text = "LumaTray"
@@ -112,11 +116,8 @@ namespace LumaTray
                 }
             };
 
-            RegisterHotkeys();
+            _menuItemHotkeys.Checked = RegisterHotkeys();
             UpdateTrayTooltip();
-
-            // Initial memory trim
-            NativeMethods.EmptyWorkingSet(Process.GetCurrentProcess().Handle);
         }
 
         private Icon CreateTrayIcon()
@@ -158,7 +159,14 @@ namespace LumaTray
                 }
 
                 IntPtr hIcon = bmp.GetHicon();
-                return Icon.FromHandle(hIcon);
+                try
+                {
+                    return (Icon)Icon.FromHandle(hIcon).Clone();
+                }
+                finally
+                {
+                    NativeMethods.DestroyIcon(hIcon);
+                }
             }
         }
 
@@ -194,13 +202,15 @@ namespace LumaTray
             _trayIcon.ContextMenu.Show(_flyout, _flyout.PointToClient(pt));
         }
 
-        private void RegisterHotkeys()
+        private bool RegisterHotkeys()
         {
             if (_msgWindow != null && _msgWindow.Handle != IntPtr.Zero)
             {
-                NativeMethods.RegisterHotKey(_msgWindow.Handle, 1, NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_NOREPEAT, NativeMethods.VK_UP);
-                NativeMethods.RegisterHotKey(_msgWindow.Handle, 2, NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_NOREPEAT, NativeMethods.VK_DOWN);
+                bool ok1 = NativeMethods.RegisterHotKey(_msgWindow.Handle, 1, NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_NOREPEAT, NativeMethods.VK_UP);
+                bool ok2 = NativeMethods.RegisterHotKey(_msgWindow.Handle, 2, NativeMethods.MOD_CONTROL | NativeMethods.MOD_ALT | NativeMethods.MOD_NOREPEAT, NativeMethods.VK_DOWN);
+                return ok1 && ok2;
             }
+            return false;
         }
 
         private void UnregisterHotkeys()
@@ -221,8 +231,12 @@ namespace LumaTray
             }
             else
             {
-                RegisterHotkeys();
-                _menuItemHotkeys.Checked = true;
+                bool success = RegisterHotkeys();
+                _menuItemHotkeys.Checked = success;
+                if (!success)
+                {
+                    MessageBox.Show("Could not register hotkeys (Ctrl+Alt+Up / Ctrl+Alt+Down). They may already be in use by another application.", "LumaTray", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
             }
         }
 
@@ -233,26 +247,34 @@ namespace LumaTray
 
             if (monitors.Count == 0) return;
 
-            int lastBrightness = 0;
-            string title = "";
-
-            foreach (var m in monitors)
+            if (_flyout.IsLinked || monitors.Count == 1)
             {
-                int newVal = Math.Max((int)m.MinBrightness, Math.Min((int)m.MaxBrightness, m.CurrentBrightness + step));
-                _manager.SetBrightnessAsync(m, newVal);
-                lastBrightness = newVal;
-                title = m.FriendlyName;
-            }
+                int lastBrightness = 0;
+                foreach (var m in monitors)
+                {
+                    int newVal = Math.Max((int)m.MinBrightness, Math.Min((int)m.MaxBrightness, m.CurrentBrightness + step));
+                    _manager.SetBrightnessAsync(m, newVal);
+                    lastBrightness = newVal;
+                }
 
-            _flyout.SyncCardsFromMonitors();
+                _flyout.SyncCardsFromMonitors();
 
-            if (monitors.Count == 1)
-            {
-                _osd.ShowBrightness(title, lastBrightness);
+                if (monitors.Count == 1)
+                {
+                    _osd.ShowBrightness(monitors[0].FriendlyName, lastBrightness);
+                }
+                else
+                {
+                    _osd.ShowBrightness("All Displays", lastBrightness);
+                }
             }
             else
             {
-                _osd.ShowBrightness("All Displays", lastBrightness);
+                var targetMon = monitors[0];
+                int newVal = Math.Max((int)targetMon.MinBrightness, Math.Min((int)targetMon.MaxBrightness, targetMon.CurrentBrightness + step));
+                _manager.SetBrightnessAsync(targetMon, newVal);
+                _flyout.SyncCardsFromMonitors();
+                _osd.ShowBrightness(targetMon.FriendlyName, newVal);
             }
         }
 
@@ -265,7 +287,13 @@ namespace LumaTray
         {
             ThemeManager.ReloadTheme();
             _flyout.ApplyTheme();
-            _trayIcon.Icon = CreateTrayIcon();
+            Icon old = _currentTrayIcon;
+            _currentTrayIcon = CreateTrayIcon();
+            _trayIcon.Icon = _currentTrayIcon;
+            if (old != null)
+            {
+                try { old.Dispose(); } catch { }
+            }
         }
 
         private bool IsStartupEnabled()
@@ -316,6 +344,10 @@ namespace LumaTray
             UnregisterHotkeys();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
+            if (_currentTrayIcon != null)
+            {
+                try { _currentTrayIcon.Dispose(); } catch { }
+            }
             _osd.Dispose();
             _flyout.Dispose();
             _manager.Dispose();
@@ -350,7 +382,19 @@ namespace LumaTray
                 {
                     _parent.HandleDisplayChange();
                 }
-                else if (m.Msg == NativeMethods.WM_SETTINGCHANGE || m.Msg == NativeMethods.WM_THEMECHANGED)
+                else if (m.Msg == NativeMethods.WM_SETTINGCHANGE)
+                {
+                    try
+                    {
+                        string section = Marshal.PtrToStringAuto(m.LParam);
+                        if (string.IsNullOrEmpty(section) || section == "ImmersiveColorSet" || section == "WindowsThemeElement")
+                        {
+                            _parent.HandleThemeChange();
+                        }
+                    }
+                    catch { }
+                }
+                else if (m.Msg == NativeMethods.WM_THEMECHANGED)
                 {
                     _parent.HandleThemeChange();
                 }

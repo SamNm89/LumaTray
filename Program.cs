@@ -11,12 +11,18 @@ namespace LumaTray
         [STAThread]
         static void Main()
         {
-            // Enable High DPI Awareness for crisp fonts & icons
+            // Enable Per-Monitor V2 High DPI Awareness for crisp fonts & icons on mixed-DPI screens
             try
             {
-                NativeMethods.SetProcessDPIAware();
+                if (!NativeMethods.SetProcessDpiAwarenessContext(NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2))
+                {
+                    NativeMethods.SetProcessDPIAware();
+                }
             }
-            catch { }
+            catch
+            {
+                try { NativeMethods.SetProcessDPIAware(); } catch { }
+            }
 
             // Ensure only one instance of LumaTray runs at a time
             bool createdNew;

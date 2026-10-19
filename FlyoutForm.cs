@@ -24,6 +24,7 @@ namespace LumaTray
         private int _scrollIndex = 0;
         private int _targetScrollTop = 0;
         private bool _isLinked = false;
+        private bool _isUpdatingLinked = false;
 
         public bool CanScrollCards
         {
@@ -243,8 +244,12 @@ namespace LumaTray
         {
             _scrollAnimTimer.Stop();
             _cardsContainer.SuspendLayout();
-            _cardsContainer.Controls.Clear();
+            foreach (var oldCard in _cards)
+            {
+                oldCard.Dispose();
+            }
             _cards.Clear();
+            _cardsContainer.Controls.Clear();
             _scrollIndex = 0;
             _targetScrollTop = 0;
             _cardsContainer.Top = 0;
@@ -415,14 +420,22 @@ namespace LumaTray
 
         public void NotifyCardSliderChanged(MonitorInfo sourceMonitor, int delta)
         {
-            if (!_isLinked) return;
+            if (!_isLinked || _isUpdatingLinked) return;
 
-            foreach (var card in _cards)
+            try
             {
-                if (card.Monitor != sourceMonitor)
+                _isUpdatingLinked = true;
+                foreach (var card in _cards)
                 {
-                    card.AdjustBrightness(delta);
+                    if (card.Monitor != sourceMonitor)
+                    {
+                        card.AdjustBrightness(delta);
+                    }
                 }
+            }
+            finally
+            {
+                _isUpdatingLinked = false;
             }
         }
 
@@ -574,12 +587,6 @@ namespace LumaTray
         {
             _scrollAnimTimer.Stop();
             Hide();
-            try
-            {
-                GC.Collect(1, GCCollectionMode.Optimized);
-                NativeMethods.EmptyWorkingSet(Process.GetCurrentProcess().Handle);
-            }
-            catch { }
         }
 
         protected override void Dispose(bool disposing)
@@ -591,6 +598,11 @@ namespace LumaTray
                     _scrollAnimTimer.Stop();
                     _scrollAnimTimer.Dispose();
                 }
+                foreach (var card in _cards)
+                {
+                    card.Dispose();
+                }
+                _cards.Clear();
             }
             base.Dispose(disposing);
         }
@@ -780,6 +792,21 @@ namespace LumaTray
             }
 
             base.OnPaint(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (_slider != null)
+                {
+                    _slider.ValueChanged -= OnSliderValueChanged;
+                    _slider.Dispose();
+                }
+                if (_titleLabel != null) _titleLabel.Dispose();
+                if (_pctLabel != null) _pctLabel.Dispose();
+            }
+            base.Dispose(disposing);
         }
     }
 }

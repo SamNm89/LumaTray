@@ -28,8 +28,13 @@ namespace LumaTray
         private readonly object _lock = new object();
         private readonly Queue<KeyValuePair<MonitorInfo, int>> _workQueue = new Queue<KeyValuePair<MonitorInfo, int>>();
         private readonly AutoResetEvent _workSignal = new AutoResetEvent(false);
+        private readonly SynchronizationContext _syncContext;
         private Thread _workerThread;
         private bool _running = true;
+
+        private bool _isRefreshing = false;
+        private bool _refreshQueued = false;
+        private readonly object _refreshLock = new object();
 
         private readonly List<KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>> _allocatedHandles =
             new List<KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>>();
@@ -39,6 +44,7 @@ namespace LumaTray
 
         public MonitorManager()
         {
+            _syncContext = SynchronizationContext.Current;
             _workerThread = new Thread(WorkerLoop)
             {
                 IsBackground = true,
@@ -104,8 +110,6 @@ namespace LumaTray
                         }
                         else
                         {
-                            // External physical monitor via DDC/CI
-                            // Attempt SetVCPFeature (0x10 = Luminance) with retry, just like Test2
                             bool success = false;
                             for (int attempt = 0; attempt < 2; attempt++)
                             {
@@ -116,7 +120,6 @@ namespace LumaTray
                                 }
                                 Thread.Sleep(15);
                             }
-                            // Fallback to SetMonitorBrightness if SetVCPFeature wasn't accepted
                             if (!success)
                             {
                                 NativeMethods.SetMonitorBrightness(mon.PhysicalHandle, (uint)val);
@@ -130,85 +133,125 @@ namespace LumaTray
 
         public void RefreshMonitors()
         {
-            lock (_lock)
+            lock (_refreshLock)
             {
-                CleanupPhysicalHandles();
-                _monitors.Clear();
-
-                // 1. Discover DDC/CI Physical Monitors
-                int displayIndex = 1;
-                NativeMethods.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, delegate(IntPtr hMon, IntPtr hdc, ref NativeMethods.RECT rc, IntPtr data)
+                if (_isRefreshing)
                 {
-                    NativeMethods.MONITORINFOEX info = new NativeMethods.MONITORINFOEX();
-                    info.cbSize = Marshal.SizeOf(typeof(NativeMethods.MONITORINFOEX));
-                    NativeMethods.GetMonitorInfo(hMon, ref info);
+                    _refreshQueued = true;
+                    return;
+                }
+                _isRefreshing = true;
+            }
 
-                    string friendlyName = GetFriendlyNameFromDevice(info.szDevice);
-
-                    uint count = 0;
-                    if (NativeMethods.GetNumberOfPhysicalMonitorsFromHMONITOR(hMon, out count) && count > 0)
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                while (_running)
+                {
+                    lock (_refreshLock)
                     {
-                        var phys = new NativeMethods.PHYSICAL_MONITOR[count];
-                        if (NativeMethods.GetPhysicalMonitorsFromHMONITOR(hMon, count, phys))
+                        _refreshQueued = false;
+                    }
+
+                    PerformHardwareScan();
+
+                    lock (_refreshLock)
+                    {
+                        if (!_refreshQueued)
                         {
-                            _allocatedHandles.Add(new KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>(count, phys));
+                            _isRefreshing = false;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
-                            for (int i = 0; i < count; i++)
+        private void PerformHardwareScan()
+        {
+            var newMonitors = new List<MonitorInfo>();
+            var newHandles = new List<KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>>();
+
+            // 1. Discover DDC/CI Physical Monitors
+            int displayIndex = 1;
+            NativeMethods.EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, delegate(IntPtr hMon, IntPtr hdc, ref NativeMethods.RECT rc, IntPtr data)
+            {
+                NativeMethods.MONITORINFOEX info = new NativeMethods.MONITORINFOEX();
+                info.cbSize = Marshal.SizeOf(typeof(NativeMethods.MONITORINFOEX));
+                NativeMethods.GetMonitorInfo(hMon, ref info);
+
+                string friendlyName = GetFriendlyNameFromDevice(info.szDevice);
+
+                uint count = 0;
+                if (NativeMethods.GetNumberOfPhysicalMonitorsFromHMONITOR(hMon, out count) && count > 0)
+                {
+                    var phys = new NativeMethods.PHYSICAL_MONITOR[count];
+                    if (NativeMethods.GetPhysicalMonitorsFromHMONITOR(hMon, count, phys))
+                    {
+                        newHandles.Add(new KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>(count, phys));
+
+                        for (int i = 0; i < count; i++)
+                        {
+                            uint min = 0, curr = 50, max = 100;
+                            uint vcpType = 0, vcpCur = 0, vcpMax = 0;
+                            bool readOk = false;
+
+                            // Resilient retry for DDC reads
+                            for (int attempt = 0; attempt < 2; attempt++)
                             {
-                                uint min = 0, curr = 50, max = 100;
-                                uint vcpType = 0, vcpCur = 0, vcpMax = 0;
-
-                                // Prefer direct VCP 0x10 query, then fallback to GetMonitorBrightness
-                                bool readOk = NativeMethods.GetVCPFeatureAndVCPFeatureReply(phys[i].hPhysicalMonitor, 0x10, out vcpType, out vcpCur, out vcpMax);
+                                readOk = NativeMethods.GetVCPFeatureAndVCPFeatureReply(phys[i].hPhysicalMonitor, 0x10, out vcpType, out vcpCur, out vcpMax);
                                 if (readOk && vcpMax > 0)
                                 {
                                     min = 0;
                                     curr = vcpCur;
                                     max = vcpMax;
+                                    break;
                                 }
-                                else
-                                {
-                                    readOk = NativeMethods.GetMonitorBrightness(phys[i].hPhysicalMonitor, out min, out curr, out max);
-                                }
+                                readOk = NativeMethods.GetMonitorBrightness(phys[i].hPhysicalMonitor, out min, out curr, out max);
+                                if (readOk) break;
 
-                                if (readOk)
-                                {
-                                    string name = friendlyName;
-                                    if (string.IsNullOrEmpty(name) || name == "Generic PnP Monitor")
-                                    {
-                                        name = !string.IsNullOrEmpty(phys[i].szPhysicalMonitorDescription) && phys[i].szPhysicalMonitorDescription != "Generic PnP Monitor"
-                                            ? phys[i].szPhysicalMonitorDescription
-                                            : "Display " + displayIndex;
-                                    }
-
-                                    _monitors.Add(new MonitorInfo
-                                    {
-                                        Id = "DDC_" + displayIndex + "_" + i,
-                                        FriendlyName = name,
-                                        DeviceName = info.szDevice,
-                                        IsWmi = false,
-                                        PhysicalHandle = phys[i].hPhysicalMonitor,
-                                        MinBrightness = min,
-                                        MaxBrightness = max > 0 ? max : 100,
-                                        CurrentBrightness = (int)curr
-                                    });
-                                }
+                                Thread.Sleep(15);
                             }
+
+                            string name = friendlyName;
+                            if (string.IsNullOrEmpty(name) || name == "Generic PnP Monitor")
+                            {
+                                name = !string.IsNullOrEmpty(phys[i].szPhysicalMonitorDescription) && phys[i].szPhysicalMonitorDescription != "Generic PnP Monitor"
+                                    ? phys[i].szPhysicalMonitorDescription
+                                    : "Display " + displayIndex;
+                            }
+
+                            // Keep monitor visible even if initial read timed out (default 50%)
+                            newMonitors.Add(new MonitorInfo
+                            {
+                                Id = "DDC_" + displayIndex + "_" + i,
+                                FriendlyName = name,
+                                DeviceName = info.szDevice,
+                                IsWmi = false,
+                                PhysicalHandle = phys[i].hPhysicalMonitor,
+                                MinBrightness = min,
+                                MaxBrightness = max > 0 ? max : 100,
+                                CurrentBrightness = (int)curr
+                            });
                         }
                     }
-                    displayIndex++;
-                    return true;
-                }, IntPtr.Zero);
+                }
+                displayIndex++;
+                return true;
+            }, IntPtr.Zero);
 
-                // 2. Discover WMI Internal Displays (Laptops, Surface, etc.)
-                try
+            // 2. Discover WMI Internal Displays (Laptops, Surface, etc.) - Leak Free
+            try
+            {
+                using (var searcher = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM WmiMonitorBrightness"))
+                using (var results = searcher.Get())
                 {
-                    using (var searcher = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM WmiMonitorBrightness"))
+                    foreach (ManagementObject mo in results)
                     {
-                        foreach (ManagementObject mo in searcher.Get())
+                        using (mo)
                         {
                             string instanceName = mo["InstanceName"] != null ? mo["InstanceName"].ToString() : "Internal Display";
-                            int curr = Convert.ToInt32(mo["CurrentBrightness"]);
+                            int curr = 50;
+                            try { curr = Convert.ToInt32(mo["CurrentBrightness"]); } catch { }
 
                             string cleanName = "Internal Display";
                             if (instanceName.Contains(@"\"))
@@ -217,7 +260,7 @@ namespace LumaTray
                                 if (parts.Length > 1) cleanName = parts[1];
                             }
 
-                            _monitors.Add(new MonitorInfo
+                            newMonitors.Add(new MonitorInfo
                             {
                                 Id = "WMI_" + instanceName,
                                 FriendlyName = cleanName,
@@ -232,10 +275,40 @@ namespace LumaTray
                         }
                     }
                 }
+            }
+            catch { }
+
+            // 3. Atomically swap monitors and physical handles
+            List<KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>> oldHandles;
+            lock (_lock)
+            {
+                oldHandles = new List<KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>>(_allocatedHandles);
+                _allocatedHandles.Clear();
+                _allocatedHandles.AddRange(newHandles);
+
+                _monitors.Clear();
+                _monitors.AddRange(newMonitors);
+            }
+
+            // 4. Safely clean up old physical handles on background thread
+            foreach (var item in oldHandles)
+            {
+                try
+                {
+                    NativeMethods.DestroyPhysicalMonitors(item.Key, item.Value);
+                }
                 catch { }
             }
 
-            if (MonitorsRefreshed != null)
+            // 5. Notify UI thread via SynchronizationContext
+            if (_syncContext != null)
+            {
+                _syncContext.Post(delegate
+                {
+                    if (MonitorsRefreshed != null) MonitorsRefreshed();
+                }, null);
+            }
+            else if (MonitorsRefreshed != null)
             {
                 MonitorsRefreshed();
             }
@@ -246,11 +319,19 @@ namespace LumaTray
             try
             {
                 using (var searcher = new ManagementObjectSearcher(@"root\wmi", "SELECT * FROM WmiMonitorBrightnessMethods"))
+                using (var results = searcher.Get())
                 {
-                    foreach (ManagementObject mo in searcher.Get())
+                    foreach (ManagementObject mo in results)
                     {
-                        mo.InvokeMethod("WmiSetBrightness", new object[] { 1, (byte)brightness });
-                        break;
+                        using (mo)
+                        {
+                            string inst = mo["InstanceName"] != null ? mo["InstanceName"].ToString() : "";
+                            if (string.IsNullOrEmpty(instanceName) || inst == instanceName || inst.StartsWith(instanceName))
+                            {
+                                mo.InvokeMethod("WmiSetBrightness", new object[] { 1, (byte)brightness });
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -321,15 +402,18 @@ namespace LumaTray
 
         private void CleanupPhysicalHandles()
         {
-            foreach (var item in _allocatedHandles)
+            lock (_lock)
             {
-                try
+                foreach (var item in _allocatedHandles)
                 {
-                    NativeMethods.DestroyPhysicalMonitors(item.Key, item.Value);
+                    try
+                    {
+                        NativeMethods.DestroyPhysicalMonitors(item.Key, item.Value);
+                    }
+                    catch { }
                 }
-                catch { }
+                _allocatedHandles.Clear();
             }
-            _allocatedHandles.Clear();
         }
 
         public void Dispose()

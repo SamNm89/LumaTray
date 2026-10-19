@@ -31,11 +31,6 @@ namespace LumaTray
             {
                 _hideTimer.Stop();
                 Hide();
-                try
-                {
-                    NativeMethods.EmptyWorkingSet(Process.GetCurrentProcess().Handle);
-                }
-                catch { }
             };
         }
 

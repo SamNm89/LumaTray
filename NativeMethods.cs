@@ -93,8 +93,16 @@ namespace LumaTray
         [DllImport("psapi.dll")]
         public static extern int EmptyWorkingSet(IntPtr hwProc);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool DestroyIcon(IntPtr hIcon);
+
         [DllImport("user32.dll")]
         public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SetProcessDpiAwarenessContext(IntPtr dpiContext);
+
+        public static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = new IntPtr(-4);
 
         [DllImport("user32.dll")]
         public static extern bool SetProcessDPIAware();
