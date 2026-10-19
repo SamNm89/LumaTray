@@ -45,6 +45,7 @@ namespace LumaTray
         public string ReleaseName { get; set; }
         public string PatchNotes { get; set; }
         public string DownloadUrl { get; set; }
+        public string ApiAssetUrl { get; set; }
         public string HtmlUrl { get; set; }
         public string ExpectedSha256 { get; set; }
         public string ChecksumUrl { get; set; }
@@ -120,9 +121,11 @@ namespace LumaTray
 
                     // 1. GitHub asset digest ("digest":"sha256:...") specifically for LumaTray.exe
                     string expectedSha = null;
+                    string apiAssetUrl = null;
                     string exeAssetBlock = ExtractAssetBlock(json, "LumaTray.exe");
                     if (!string.IsNullOrEmpty(exeAssetBlock))
                     {
+                        apiAssetUrl = MatchValue(exeAssetBlock, "\"url\"\\s*:\\s*\"([^\"]+)\"");
                         expectedSha = MatchValue(exeAssetBlock, "\"digest\"\\s*:\\s*\"sha256:([A-Fa-f0-9]{64})\"");
                     }
 
@@ -148,6 +151,7 @@ namespace LumaTray
                                 ReleaseName = string.IsNullOrEmpty(name) ? tag : name,
                                 PatchNotes = patchNotes,
                                 DownloadUrl = downloadUrl,
+                                ApiAssetUrl = apiAssetUrl,
                                 HtmlUrl = htmlUrl,
                                 ExpectedSha256 = expectedSha,
                                 ChecksumUrl = checksumUrl
@@ -318,22 +322,49 @@ namespace LumaTray
                 try
                 {
                     ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+                    ServicePointManager.DefaultConnectionLimit = 10;
+                    ServicePointManager.Expect100Continue = false;
 
-                    using (var wc = new TimeoutWebClient(30000))
+                    bool downloaded = false;
+                    string[] urlsToTry = new string[] { update.ApiAssetUrl, update.DownloadUrl };
+
+                    foreach (string dlUrl in urlsToTry)
                     {
-                        activeClient = wc;
-                        wc.Headers.Add("User-Agent", "LumaTray-App");
-
-                        using (var response = wc.OpenRead(update.DownloadUrl))
-                        using (var fs = new FileStream(tempExe, FileMode.Create, FileAccess.Write, FileShare.None))
+                        if (string.IsNullOrEmpty(dlUrl) || isCancelled) continue;
+                        try
                         {
-                            byte[] buffer = new byte[8192];
-                            int read;
-                            while ((read = response.Read(buffer, 0, buffer.Length)) > 0)
+                            using (var wc = new TimeoutWebClient(12000))
                             {
-                                if (isCancelled) break;
-                                fs.Write(buffer, 0, read);
+                                activeClient = wc;
+                                wc.Headers.Add("User-Agent", "LumaTray-App");
+                                wc.Headers.Add("Accept", "application/octet-stream");
+
+                                using (var response = wc.OpenRead(dlUrl))
+                                using (var fs = new FileStream(tempExe, FileMode.Create, FileAccess.Write, FileShare.None))
+                                {
+                                    byte[] buffer = new byte[32768];
+                                    int read;
+                                    while ((read = response.Read(buffer, 0, buffer.Length)) > 0)
+                                    {
+                                        if (isCancelled) break;
+                                        fs.Write(buffer, 0, read);
+                                    }
+                                }
                             }
+
+                            if (!isCancelled)
+                            {
+                                FileInfo testFi = new FileInfo(tempExe);
+                                if (testFi.Exists && testFi.Length >= 30000)
+                                {
+                                    downloaded = true;
+                                    break;
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            try { if (File.Exists(tempExe)) File.Delete(tempExe); } catch { }
                         }
                     }
 
@@ -343,8 +374,7 @@ namespace LumaTray
                         return;
                     }
 
-                    FileInfo fi = new FileInfo(tempExe);
-                    if (!fi.Exists || fi.Length < 30000)
+                    if (!downloaded)
                     {
                         throw new Exception("Downloaded file is incomplete or invalid.");
                     }
