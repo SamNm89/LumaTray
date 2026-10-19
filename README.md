@@ -4,7 +4,7 @@ A tiny, fast, and native Windows tray app to control monitor brightness.
 
 I built this because I got fed up with Twinkle Tray sucking up 200 MB of RAM just to adjust brightness. After a little research, I found out it's because it's built with Electron slop! So I built mine with native C#.
 
-**LumaTray** is written in C# targeting native Windows APIs (.NET 4.8 framework). It uses ~1–2 MB of trimmed idle RAM (~28 MB commit), zero background CPU, and lives as a single **~76 KB** standalone `.exe`.
+**LumaTray** is written in C# targeting native Windows APIs (.NET 4.8 framework). It uses ~1–2 MB of trimmed idle RAM (~24–30 MB commit), zero background CPU, and lives as a single **~76 KB** standalone `.exe`.
 
 ---
 
@@ -13,7 +13,7 @@ I built this because I got fed up with Twinkle Tray sucking up 200 MB of RAM jus
 | | Twinkle Tray | **LumaTray** |
 | :--- | :--- | :--- |
 | **Engine** | Electron (Chromium + Node) | **Native Win32 + C# (.NET 4.8 in-box)** |
-| **Idle RAM** | 120 – 200+ MB | **~1 – 2 MB** (working set) / ~28 MB commit |
+| **Idle RAM** | 120 – 200+ MB | **~1 – 2 MB** (working set) / ~24–30 MB commit |
 | **Idle CPU** | Periodic background spikes | **0.0%** (sleeps until clicked) |
 | **Size** | ~150 MB installer | **~76 KB** single `.exe` |
 | **Startup** | 3 – 5 seconds | **Instant** (< 100 ms) |

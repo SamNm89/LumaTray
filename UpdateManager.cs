@@ -99,8 +99,13 @@ namespace LumaTray
                         SettingsManager.CachedPatchNotes = patchNotes;
                     }
 
-                    // 1. GitHub asset digest ("digest":"sha256:...")
-                    string expectedSha = MatchValue(json, "\"digest\"\\s*:\\s*\"sha256:([A-Fa-f0-9]{64})\"");
+                    // 1. GitHub asset digest ("digest":"sha256:...") specifically for LumaTray.exe
+                    string expectedSha = null;
+                    string exeAssetBlock = ExtractAssetBlock(json, "LumaTray.exe");
+                    if (!string.IsNullOrEmpty(exeAssetBlock))
+                    {
+                        expectedSha = MatchValue(exeAssetBlock, "\"digest\"\\s*:\\s*\"sha256:([A-Fa-f0-9]{64})\"");
+                    }
 
                     // 2. Fallback to release notes SHA256
                     if (string.IsNullOrEmpty(expectedSha))
@@ -340,7 +345,11 @@ namespace LumaTray
                         {
                             cClient.Headers.Add("User-Agent", "LumaTray-App");
                             string checksumContent = cClient.DownloadString(update.ChecksumUrl);
-                            string match = MatchValue(checksumContent, "([A-Fa-f0-9]{64})");
+                            string match = MatchValue(checksumContent, "([A-Fa-f0-9]{64})\\s+[* ]?LumaTray\\.exe");
+                            if (string.IsNullOrEmpty(match))
+                            {
+                                match = MatchValue(checksumContent, "([A-Fa-f0-9]{64})");
+                            }
                             if (!string.IsNullOrEmpty(match))
                             {
                                 expectedSha = match;
@@ -371,17 +380,19 @@ namespace LumaTray
                         throw new Exception("Security verification failed: Downloaded file checksum does not match release SHA-256!\n\nExpected: " + expectedSha + "\nActual:   " + actualSha);
                     }
 
-                    // 4. In-place swap command using Windows rename strategy (current -> current.old)
+                    // 4. In-place swap command using Windows rename strategy (current -> current.old) with restore fallback
                     string currentExe = Application.ExecutablePath;
+                    string currentDir = Path.GetDirectoryName(currentExe);
                     string exeName = Path.GetFileName(currentExe);
                     string cmdArgs = string.Format(
-                        "/c timeout /t 1 /nobreak > NUL & del /f /q \"{1}.old\" > NUL 2>&1 & ren \"{1}\" \"{2}.old\" && move /y \"{0}\" \"{1}\" && start \"\" \"{1}\"",
-                        tempExe, currentExe, exeName);
+                        "/c timeout /t 1 /nobreak > NUL & del /f /q \"{1}.old\" > NUL 2>&1 & (ren \"{1}\" \"{1}.old\" && move /y \"{0}\" \"{1}\" && start \"\" \"{1}\") || (del /f /q \"{1}\" > NUL 2>&1 & ren \"{1}.old\" \"{1}\" > NUL 2>&1 & start \"\" \"{1}\")",
+                        tempExe, exeName);
 
                     ProcessStartInfo psi = new ProcessStartInfo
                     {
                         FileName = "cmd.exe",
                         Arguments = cmdArgs,
+                        WorkingDirectory = currentDir,
                         CreateNoWindow = true,
                         UseShellExecute = false
                     };
@@ -441,6 +452,42 @@ namespace LumaTray
             {
                 return input.Replace("\\r\\n", "\r\n").Replace("\\n", "\n").Replace("\\\"", "\"").Replace("\\\\", "\\");
             }
+        }
+
+        private static string ExtractAssetBlock(string json, string filename)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            int assetsIdx = json.IndexOf("\"assets\"");
+            if (assetsIdx < 0) return null;
+            int startArr = json.IndexOf('[', assetsIdx);
+            if (startArr < 0) return null;
+
+            int depth = 0;
+            int objStart = -1;
+            for (int i = startArr + 1; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (c == ']' && depth == 0) break;
+                if (c == '{')
+                {
+                    if (depth == 0) objStart = i;
+                    depth++;
+                }
+                else if (c == '}')
+                {
+                    depth--;
+                    if (depth == 0 && objStart >= 0)
+                    {
+                        string block = json.Substring(objStart, i - objStart + 1);
+                        if (block.IndexOf(filename, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            return block;
+                        }
+                        objStart = -1;
+                    }
+                }
+            }
+            return null;
         }
     }
 }

@@ -704,6 +704,7 @@ namespace LumaTray
         private readonly int _index;
         private int _lastValue;
         private bool _isCardFocused = false;
+        private bool _isSyncing = false;
 
         public bool IsCardFocused
         {
@@ -833,14 +834,24 @@ namespace LumaTray
         {
             if (_slider.Value != Monitor.CurrentBrightness)
             {
-                _slider.Value = Monitor.CurrentBrightness;
-                _pctLabel.Text = Monitor.CurrentBrightness + "%";
-                _lastValue = Monitor.CurrentBrightness;
+                _isSyncing = true;
+                try
+                {
+                    _lastValue = Monitor.CurrentBrightness;
+                    _slider.Value = Monitor.CurrentBrightness;
+                    _pctLabel.Text = Monitor.CurrentBrightness + "%";
+                }
+                finally
+                {
+                    _isSyncing = false;
+                }
             }
         }
 
         private void OnSliderValueChanged(object sender, EventArgs e)
         {
+            if (_isSyncing) return;
+
             int val = _slider.Value;
             _pctLabel.Text = val + "%";
 
