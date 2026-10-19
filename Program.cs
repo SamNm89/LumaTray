@@ -38,6 +38,15 @@ namespace LumaTray
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
+            Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e)
+            {
+                try { System.IO.File.WriteAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log"), e.Exception.ToString()); } catch { }
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e)
+            {
+                try { System.IO.File.WriteAllText(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log"), (e.ExceptionObject ?? "").ToString()); } catch { }
+            };
+
             Application.Run(new TrayApplicationContext());
 
             // Release mutex on exit
