@@ -385,7 +385,7 @@ namespace LumaTray
                     string currentDir = Path.GetDirectoryName(currentExe);
                     string exeName = Path.GetFileName(currentExe);
                     string cmdArgs = string.Format(
-                        "/c timeout /t 1 /nobreak > NUL & del /f /q \"{1}.old\" > NUL 2>&1 & (ren \"{1}\" \"{1}.old\" && move /y \"{0}\" \"{1}\" && start \"\" \"{1}\") || (del /f /q \"{1}\" > NUL 2>&1 & ren \"{1}.old\" \"{1}\" > NUL 2>&1 & start \"\" \"{1}\")",
+                        "/c timeout /t 1 /nobreak > NUL & del /f /q \"{1}.old\" > NUL 2>&1 & (ren \"{1}\" \"{1}.old\" && move /y \"{0}\" \"{1}\" && start \"\" \"{1}\") || ((if not exist \"{1}\" ren \"{1}.old\" \"{1}\" > NUL 2>&1) & start \"\" \"{1}\")",
                         tempExe, exeName);
 
                     ProcessStartInfo psi = new ProcessStartInfo
