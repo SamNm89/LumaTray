@@ -146,6 +146,22 @@ namespace LumaTray
             _menuItemHotkeys.Checked = RegisterHotkeys();
             UpdateTrayTooltip();
 
+            // Initial memory trim once startup initialization and JIT compile settles
+            Timer startupTrimTimer = new Timer { Interval = 1500 };
+            startupTrimTimer.Tick += delegate
+            {
+                startupTrimTimer.Stop();
+                startupTrimTimer.Dispose();
+                try
+                {
+                    BufferedGraphicsManager.Current.Invalidate();
+                    GC.Collect(1, GCCollectionMode.Optimized);
+                    NativeMethods.EmptyWorkingSet(Process.GetCurrentProcess().Handle);
+                }
+                catch { }
+            };
+            startupTrimTimer.Start();
+
             // Background update check after 4 seconds (once per 24 hours, non-blocking)
             Timer updateTimer = new Timer { Interval = 4000 };
             updateTimer.Tick += delegate

@@ -18,6 +18,7 @@ namespace LumaTray
         private readonly ModernIconButton _btnLink;
         private readonly ModernIconButton _btnSettings;
         private readonly ModernIconButton _btnUpdate;
+        private readonly ToolTip _toolTip;
         private readonly List<MonitorRowCard> _cards = new List<MonitorRowCard>();
         private readonly Timer _scrollAnimTimer;
 
@@ -131,10 +132,10 @@ namespace LumaTray
                 }
             };
 
-            ToolTip tt = new ToolTip();
-            tt.SetToolTip(_btnUpdate, "Update available! Click to install");
-            tt.SetToolTip(_btnLink, "Link display brightness sliders");
-            tt.SetToolTip(_btnSettings, "Settings & menu");
+            _toolTip = new ToolTip();
+            _toolTip.SetToolTip(_btnUpdate, "Update available! Click to install");
+            _toolTip.SetToolTip(_btnLink, "Link display brightness sliders");
+            _toolTip.SetToolTip(_btnSettings, "Settings & menu");
 
             headerPanel.Controls.Add(_titleLabel);
             headerPanel.Controls.Add(_countBadge);
@@ -627,6 +628,13 @@ namespace LumaTray
         {
             _scrollAnimTimer.Stop();
             Hide();
+            try
+            {
+                BufferedGraphicsManager.Current.Invalidate();
+                GC.Collect(1, GCCollectionMode.Optimized);
+                NativeMethods.EmptyWorkingSet(Process.GetCurrentProcess().Handle);
+            }
+            catch { }
         }
 
         protected override void Dispose(bool disposing)
@@ -644,6 +652,10 @@ namespace LumaTray
                     card.Dispose();
                 }
                 _cards.Clear();
+                if (_toolTip != null)
+                {
+                    _toolTip.Dispose();
+                }
             }
             base.Dispose(disposing);
         }
