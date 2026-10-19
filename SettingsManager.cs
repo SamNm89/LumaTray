@@ -191,10 +191,6 @@ namespace LumaTray
                 {
                     SaveBrightness(m.Id, m.CurrentBrightness);
                 }
-                if (!string.IsNullOrEmpty(m.FriendlyName))
-                {
-                    SaveBrightness(m.FriendlyName, m.CurrentBrightness);
-                }
             }
         }
     }

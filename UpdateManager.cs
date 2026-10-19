@@ -99,7 +99,14 @@ namespace LumaTray
                         SettingsManager.CachedPatchNotes = patchNotes;
                     }
 
-                    string expectedSha = MatchValue(rawBody, "(?i)(?:sha[-_]?256|hash)\\s*[:=]\\s*([A-Fa-f0-9]{64})");
+                    // 1. GitHub asset digest ("digest":"sha256:...")
+                    string expectedSha = MatchValue(json, "\"digest\"\\s*:\\s*\"sha256:([A-Fa-f0-9]{64})\"");
+
+                    // 2. Fallback to release notes SHA256
+                    if (string.IsNullOrEmpty(expectedSha))
+                    {
+                        expectedSha = MatchValue(rawBody, "(?i)(?:sha[-_]?256|hash)\\s*[:=]\\s*([A-Fa-f0-9]{64})");
+                    }
 
                     string cleanTag = (tag ?? "").Trim().TrimStart('v', 'V');
                     Version remoteVersion;
@@ -257,6 +264,15 @@ namespace LumaTray
             bool isCancelled = false;
             TimeoutWebClient activeClient = null;
 
+            progressForm.FormClosing += delegate(object s, FormClosingEventArgs e)
+            {
+                isCancelled = true;
+                if (activeClient != null)
+                {
+                    try { activeClient.CancelAsync(); } catch { }
+                }
+            };
+
             btnCancel.Click += delegate
             {
                 isCancelled = true;
@@ -279,7 +295,18 @@ namespace LumaTray
                     {
                         activeClient = wc;
                         wc.Headers.Add("User-Agent", "LumaTray-App");
-                        wc.DownloadFile(update.DownloadUrl, tempExe);
+
+                        using (var response = wc.OpenRead(update.DownloadUrl))
+                        using (var fs = new FileStream(tempExe, FileMode.Create, FileAccess.Write, FileShare.None))
+                        {
+                            byte[] buffer = new byte[8192];
+                            int read;
+                            while ((read = response.Read(buffer, 0, buffer.Length)) > 0)
+                            {
+                                if (isCancelled) break;
+                                fs.Write(buffer, 0, read);
+                            }
+                        }
                     }
 
                     if (isCancelled)
@@ -305,58 +332,51 @@ namespace LumaTray
                         }
                     }
 
-                    // 2. Fetch checksum file if not present in release body
+                    // 2. Fetch checksum file if not present in release body/asset digest
                     string expectedSha = update.ExpectedSha256;
                     if (string.IsNullOrEmpty(expectedSha) && !string.IsNullOrEmpty(update.ChecksumUrl))
                     {
-                        try
+                        using (var cClient = new TimeoutWebClient(15000))
                         {
-                            using (var cClient = new TimeoutWebClient(15000))
+                            cClient.Headers.Add("User-Agent", "LumaTray-App");
+                            string checksumContent = cClient.DownloadString(update.ChecksumUrl);
+                            string match = MatchValue(checksumContent, "([A-Fa-f0-9]{64})");
+                            if (!string.IsNullOrEmpty(match))
                             {
-                                cClient.Headers.Add("User-Agent", "LumaTray-App");
-                                string checksumContent = cClient.DownloadString(update.ChecksumUrl);
-                                string match = MatchValue(checksumContent, "([A-Fa-f0-9]{64})");
-                                if (!string.IsNullOrEmpty(match))
-                                {
-                                    expectedSha = match;
-                                }
+                                expectedSha = match;
                             }
                         }
-                        catch { }
                     }
 
-                    // 3. Cryptographic SHA-256 verification
-                    if (!string.IsNullOrEmpty(expectedSha))
+                    // 3. FAIL-CLOSED Cryptographic SHA-256 verification
+                    if (string.IsNullOrEmpty(expectedSha))
                     {
-                        string actualSha;
-                        using (var sha = SHA256.Create())
-                        using (var fs = File.OpenRead(tempExe))
-                        {
-                            byte[] hash = sha.ComputeHash(fs);
-                            StringBuilder sb = new StringBuilder();
-                            foreach (byte b in hash) sb.Append(b.ToString("x2"));
-                            actualSha = sb.ToString();
-                        }
-
-                        if (!string.Equals(actualSha, expectedSha, StringComparison.OrdinalIgnoreCase))
-                        {
-                            try { File.Delete(tempExe); } catch { }
-                            throw new Exception("Security verification failed: Downloaded file checksum does not match release SHA-256!\n\nExpected: " + expectedSha + "\nActual:   " + actualSha);
-                        }
+                        try { if (File.Exists(tempExe)) File.Delete(tempExe); } catch { }
+                        throw new Exception("Security verification failed: No valid SHA-256 digest was published for this release. Aborting update for your protection.");
                     }
 
-                    // 4. Resilient in-place swap command with retry and failure notification
+                    string actualSha;
+                    using (var sha = SHA256.Create())
+                    using (var fs = File.OpenRead(tempExe))
+                    {
+                        byte[] hash = sha.ComputeHash(fs);
+                        StringBuilder sb = new StringBuilder();
+                        foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                        actualSha = sb.ToString();
+                    }
+
+                    if (!string.Equals(actualSha, expectedSha, StringComparison.OrdinalIgnoreCase))
+                    {
+                        try { File.Delete(tempExe); } catch { }
+                        throw new Exception("Security verification failed: Downloaded file checksum does not match release SHA-256!\n\nExpected: " + expectedSha + "\nActual:   " + actualSha);
+                    }
+
+                    // 4. In-place swap command using Windows rename strategy (current -> current.old)
                     string currentExe = Application.ExecutablePath;
+                    string exeName = Path.GetFileName(currentExe);
                     string cmdArgs = string.Format(
-                        "/c timeout /t 1 /nobreak > NUL & " +
-                        "(for /l %i in (1,1,5) do @if exist \"{0}\" (move /y \"{0}\" \"{1}\" > NUL 2>&1 & timeout /t 1 /nobreak > NUL)) & " +
-                        "if exist \"{0}\" (" +
-                        "mshta \"vbscript:MsgBox(\"\"LumaTray update could not replace the executable (access denied or file locked). Please update manually.\"\",16,\"\"Update Failed\"\")(window.close)\" & " +
-                        "start \"\" \"{1}\"" +
-                        ") else (" +
-                        "start \"\" \"{1}\"" +
-                        ")",
-                        tempExe, currentExe);
+                        "/c timeout /t 1 /nobreak > NUL & del /f /q \"{1}.old\" > NUL 2>&1 & ren \"{1}\" \"{2}.old\" && move /y \"{0}\" \"{1}\" && start \"\" \"{1}\"",
+                        tempExe, currentExe, exeName);
 
                     ProcessStartInfo psi = new ProcessStartInfo
                     {
@@ -368,23 +388,37 @@ namespace LumaTray
 
                     Process.Start(psi);
 
-                    // Exit current instance cleanly so cmd can overwrite it
-                    progressForm.BeginInvoke(new Action(delegate
+                    // Exit current instance cleanly so cmd can complete swap
+                    if (!isCancelled && !progressForm.IsDisposed && progressForm.IsHandleCreated)
                     {
-                        progressForm.Close();
-                        Application.Exit();
-                    }));
+                        try
+                        {
+                            progressForm.BeginInvoke(new Action(delegate
+                            {
+                                progressForm.Close();
+                                Application.Exit();
+                            }));
+                        }
+                        catch { }
+                    }
                 }
                 catch (Exception ex)
                 {
                     if (isCancelled) return;
 
-                    progressForm.BeginInvoke(new Action(delegate
+                    if (!progressForm.IsDisposed && progressForm.IsHandleCreated)
                     {
-                        progressForm.Close();
-                        MessageBox.Show("Could not complete update: " + ex.Message + "\n\nOpening release page...", "Update Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        try { Process.Start(update.HtmlUrl); } catch { }
-                    }));
+                        try
+                        {
+                            progressForm.BeginInvoke(new Action(delegate
+                            {
+                                progressForm.Close();
+                                MessageBox.Show("Could not complete update: " + ex.Message + "\n\nOpening release page...", "Update Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                try { Process.Start(update.HtmlUrl); } catch { }
+                            }));
+                        }
+                        catch { }
+                    }
                 }
             });
         }

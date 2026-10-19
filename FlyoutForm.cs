@@ -513,9 +513,10 @@ namespace LumaTray
                 BeginInvoke(new Action(SyncCardsFromMonitors));
                 return;
             }
-            foreach (var card in _cards)
+            var monitors = _manager.GetMonitors();
+            for (int i = 0; i < _cards.Count && i < monitors.Count; i++)
             {
-                card.SyncWithMonitor();
+                _cards[i].UpdateMonitor(monitors[i]);
             }
         }
 
@@ -820,6 +821,12 @@ namespace LumaTray
         public void AdjustBrightness(int delta)
         {
             _slider.Value = Math.Max(_slider.Minimum, Math.Min(_slider.Maximum, _slider.Value + delta));
+        }
+
+        public void UpdateMonitor(MonitorInfo monitor)
+        {
+            Monitor = monitor;
+            SyncWithMonitor();
         }
 
         public void SyncWithMonitor()

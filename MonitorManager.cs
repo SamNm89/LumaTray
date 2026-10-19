@@ -131,10 +131,6 @@ namespace LumaTray
                         {
                             SettingsManager.SaveBrightness(mon.Id, val);
                         }
-                        if (!string.IsNullOrEmpty(mon.FriendlyName))
-                        {
-                            SettingsManager.SaveBrightness(mon.FriendlyName, val);
-                        }
                     }
                     catch { }
                 }
@@ -243,7 +239,6 @@ namespace LumaTray
                             if (readOk)
                             {
                                 SettingsManager.SaveBrightness(uniqueId, (int)curr);
-                                SettingsManager.SaveBrightness(name, (int)curr);
                             }
                             else
                             {
@@ -305,7 +300,6 @@ namespace LumaTray
                             else
                             {
                                 SettingsManager.SaveBrightness(wmiId, curr);
-                                SettingsManager.SaveBrightness(cleanName, curr);
                             }
 
                             newMonitors.Add(new MonitorInfo
@@ -326,7 +320,7 @@ namespace LumaTray
             }
             catch { }
 
-            // 3. Atomically swap monitors and physical handles
+            // 3. Atomically update monitors and physical handles
             List<KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>> oldHandles;
             lock (_lock)
             {
@@ -334,8 +328,41 @@ namespace LumaTray
                 _allocatedHandles.Clear();
                 _allocatedHandles.AddRange(newHandles);
 
+                // In-place update so cards and callers holding existing MonitorInfo references
+                // immediately point to the newly allocated PhysicalHandle rather than a destroyed one
+                List<MonitorInfo> updatedList = new List<MonitorInfo>();
+                foreach (var newMon in newMonitors)
+                {
+                    MonitorInfo existing = null;
+                    foreach (var oldMon in _monitors)
+                    {
+                        if (oldMon.Id == newMon.Id)
+                        {
+                            existing = oldMon;
+                            break;
+                        }
+                    }
+
+                    if (existing != null)
+                    {
+                        existing.PhysicalHandle = newMon.PhysicalHandle;
+                        existing.CurrentBrightness = newMon.CurrentBrightness;
+                        existing.MinBrightness = newMon.MinBrightness;
+                        existing.MaxBrightness = newMon.MaxBrightness;
+                        existing.FriendlyName = newMon.FriendlyName;
+                        existing.DeviceName = newMon.DeviceName;
+                        existing.IsWmi = newMon.IsWmi;
+                        existing.WmiInstanceName = newMon.WmiInstanceName;
+                        updatedList.Add(existing);
+                    }
+                    else
+                    {
+                        updatedList.Add(newMon);
+                    }
+                }
+
                 _monitors.Clear();
-                _monitors.AddRange(newMonitors);
+                _monitors.AddRange(updatedList);
             }
 
             // 4. Safely clean up old physical handles on background thread
@@ -475,7 +502,19 @@ namespace LumaTray
                     {
                         string serial = Encoding.ASCII.GetString(edid, off + 5, 13).Trim('\0', ' ', '\r', '\n');
                         if (!string.IsNullOrEmpty(serial))
-                            return serial;
+                        {
+                            bool hasRealChar = false;
+                            foreach (char c in serial)
+                            {
+                                if (c != '0' && c != ' ' && c != '-' && c != '\0')
+                                {
+                                    hasRealChar = true;
+                                    break;
+                                }
+                            }
+                            if (hasRealChar)
+                                return serial;
+                        }
                     }
                 }
             }
