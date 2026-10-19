@@ -17,9 +17,11 @@ namespace LumaTray
         private readonly HotkeyMessageWindow _msgWindow;
 
         private Icon _currentTrayIcon;
+        private bool _hasUpdateBadge = false;
         private MenuItem _menuItemLink;
         private MenuItem _menuItemHotkeys;
         private MenuItem _menuItemStartup;
+        private MenuItem _menuItemAutoCheck;
 
         private const string RunRegistryKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string AppName = "LumaTray";
@@ -35,6 +37,7 @@ namespace LumaTray
 
             _manager.BrightnessChanged += OnBrightnessChanged;
             _manager.MonitorsRefreshed += UpdateTrayTooltip;
+            UpdateManager.UpdateFound += OnUpdateFound;
 
             // Message host Form for Hotkeys, Display Changes, and Theme Changes
             _msgWindow = new HotkeyMessageWindow(this);
@@ -76,19 +79,43 @@ namespace LumaTray
 
             menu.MenuItems.Add("-");
 
+            _menuItemAutoCheck = new MenuItem("Auto-Check for Updates", delegate
+            {
+                SettingsManager.AutoCheckUpdates = !SettingsManager.AutoCheckUpdates;
+                _menuItemAutoCheck.Checked = SettingsManager.AutoCheckUpdates;
+            });
+            _menuItemAutoCheck.Checked = SettingsManager.AutoCheckUpdates;
+            menu.MenuItems.Add(_menuItemAutoCheck);
+
+            MenuItem itemCheckNow = new MenuItem("Check for Updates...", delegate
+            {
+                CheckForUpdatesManual();
+            });
+            menu.MenuItems.Add(itemCheckNow);
+
             MenuItem itemAbout = new MenuItem("About LumaTray...", delegate
             {
                 long ws = Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
                 long priv = Process.GetCurrentProcess().PrivateMemorySize64 / (1024 * 1024);
-                MessageBox.Show(
-                    "LumaTray v1.0.1\nUltra-lightweight monitor brightness controller for Windows.\n\n" +
-                    "• RAM: ~" + ws + " MB working set (" + priv + " MB private commit vs 150-200MB in Electron)\n" +
+                string notes = SettingsManager.CachedPatchNotes;
+
+                string aboutText = string.Format(
+                    "LumaTray v{0}\n" +
+                    "Ultra-lightweight monitor brightness controller for Windows.\n\n" +
+                    "• RAM: ~{1} MB working set ({2} MB private commit vs 150-200MB in Electron)\n" +
                     "• True asynchronous DDC/CI hardware I/O & leak-free WMI\n" +
                     "• External HDMI/DP monitors (DDC/CI) & laptop screens (WMI)\n" +
-                    "• In-panel controls: Arrow keys (Left/Right adjust, Up/Down/Tab switch row)\n" +
+                    "• In-panel controls: Arrow keys & mouse wheel navigation\n" +
                     "• Hotkeys: Ctrl+Alt+Up (increase), Ctrl+Alt+Down (decrease)\n" +
                     "• Dynamic auto-sizing flyout & smooth wheel scroll for 3+ screens\n" +
-                    "• Live Windows Dark/Light theme & Accent Color sync",
+                    "• Live Windows Dark/Light theme & Accent Color sync\n\n" +
+                    "────────────────────────────────────────\n" +
+                    "{3}",
+                    UpdateManager.CurrentVersion.ToString(3),
+                    ws, priv, notes);
+
+                MessageBox.Show(
+                    aboutText,
                     "About LumaTray",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -99,7 +126,7 @@ namespace LumaTray
             menu.MenuItems.Add(itemExit);
 
             // Initialize Tray Icon
-            _currentTrayIcon = CreateTrayIcon();
+            _currentTrayIcon = CreateTrayIcon(false);
             _trayIcon = new NotifyIcon
             {
                 Icon = _currentTrayIcon,
@@ -118,45 +145,102 @@ namespace LumaTray
 
             _menuItemHotkeys.Checked = RegisterHotkeys();
             UpdateTrayTooltip();
+
+            // Background update check after 4 seconds (once per 24 hours, non-blocking)
+            Timer updateTimer = new Timer { Interval = 4000 };
+            updateTimer.Tick += delegate
+            {
+                updateTimer.Stop();
+                updateTimer.Dispose();
+
+                if (SettingsManager.AutoCheckUpdates)
+                {
+                    if ((DateTime.UtcNow - SettingsManager.LastCheckTime).TotalHours >= 24)
+                    {
+                        UpdateManager.CheckForUpdatesAsync(false);
+                    }
+                }
+            };
+            updateTimer.Start();
         }
 
-        private Icon CreateTrayIcon()
+        private Icon CreateTrayIcon(bool hasUpdateBadge)
         {
+            if (!hasUpdateBadge)
+            {
+                try
+                {
+                    Icon appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                    if (appIcon != null) return appIcon;
+                }
+                catch { }
+            }
+
+            Bitmap baseBmp = null;
             try
             {
                 Icon appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-                if (appIcon != null) return appIcon;
+                if (appIcon != null)
+                {
+                    baseBmp = appIcon.ToBitmap();
+                }
             }
             catch { }
 
-            using (Bitmap bmp = new Bitmap(32, 32))
+            using (Bitmap bmp = baseBmp != null ? new Bitmap(baseBmp, 32, 32) : new Bitmap(32, 32))
             using (Graphics g = Graphics.FromImage(bmp))
             {
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                g.Clear(Color.Transparent);
 
-                // Draw Sun Center
-                using (SolidBrush brush = new SolidBrush(Color.FromArgb(255, 204, 0)))
+                if (baseBmp == null)
                 {
-                    g.FillEllipse(brush, 10, 10, 12, 12);
+                    g.Clear(Color.Transparent);
+
+                    // Draw Sun Center
+                    using (SolidBrush brush = new SolidBrush(Color.FromArgb(255, 204, 0)))
+                    {
+                        g.FillEllipse(brush, 10, 10, 12, 12);
+                    }
+
+                    // Draw Sun Rays
+                    using (Pen rayPen = new Pen(Color.FromArgb(255, 215, 64), 2f))
+                    {
+                        rayPen.StartCap = LineCap.Round;
+                        rayPen.EndCap = LineCap.Round;
+
+                        g.DrawLine(rayPen, 16, 3, 16, 7);   // Top
+                        g.DrawLine(rayPen, 16, 25, 16, 29); // Bottom
+                        g.DrawLine(rayPen, 3, 16, 7, 16);   // Left
+                        g.DrawLine(rayPen, 25, 16, 29, 16); // Right
+
+                        g.DrawLine(rayPen, 7, 7, 10, 10);   // Top-Left
+                        g.DrawLine(rayPen, 22, 10, 25, 7);  // Top-Right
+                        g.DrawLine(rayPen, 7, 25, 10, 22);  // Bottom-Left
+                        g.DrawLine(rayPen, 22, 22, 25, 25); // Bottom-Right
+                    }
                 }
 
-                // Draw Sun Rays
-                using (Pen rayPen = new Pen(Color.FromArgb(255, 215, 64), 2f))
+                // Crisp blue notification dot when update is available
+                if (hasUpdateBadge)
                 {
-                    rayPen.StartCap = LineCap.Round;
-                    rayPen.EndCap = LineCap.Round;
+                    int dotSize = 8;
+                    int dotX = 22;
+                    int dotY = 22;
 
-                    g.DrawLine(rayPen, 16, 3, 16, 7);   // Top
-                    g.DrawLine(rayPen, 16, 25, 16, 29); // Bottom
-                    g.DrawLine(rayPen, 3, 16, 7, 16);   // Left
-                    g.DrawLine(rayPen, 25, 16, 29, 16); // Right
+                    // Dark halo separation ring
+                    using (SolidBrush ringBrush = new SolidBrush(Color.FromArgb(32, 32, 32)))
+                    {
+                        g.FillEllipse(ringBrush, dotX - 1, dotY - 1, dotSize + 2, dotSize + 2);
+                    }
 
-                    g.DrawLine(rayPen, 7, 7, 10, 10);   // Top-Left
-                    g.DrawLine(rayPen, 22, 10, 25, 7);  // Top-Right
-                    g.DrawLine(rayPen, 7, 25, 10, 22);  // Bottom-Left
-                    g.DrawLine(rayPen, 22, 22, 25, 25); // Bottom-Right
+                    // Fluent royal blue dot
+                    using (SolidBrush dotBrush = new SolidBrush(Color.FromArgb(0, 150, 255)))
+                    {
+                        g.FillEllipse(dotBrush, dotX, dotY, dotSize, dotSize);
+                    }
                 }
+
+                if (baseBmp != null) baseBmp.Dispose();
 
                 IntPtr hIcon = bmp.GetHicon();
                 try
@@ -170,6 +254,54 @@ namespace LumaTray
             }
         }
 
+        private void UpdateTrayIcon()
+        {
+            Icon old = _currentTrayIcon;
+            _currentTrayIcon = CreateTrayIcon(_hasUpdateBadge);
+            _trayIcon.Icon = _currentTrayIcon;
+            if (old != null)
+            {
+                try { old.Dispose(); } catch { }
+            }
+        }
+
+        private void OnUpdateFound(UpdateInfo info)
+        {
+            if (_msgWindow != null && _msgWindow.InvokeRequired)
+            {
+                _msgWindow.BeginInvoke(new Action<UpdateInfo>(OnUpdateFound), info);
+                return;
+            }
+            _hasUpdateBadge = true;
+            UpdateTrayIcon();
+            UpdateTrayTooltip();
+        }
+
+        private void CheckForUpdatesManual()
+        {
+            UpdateManager.CheckForUpdatesAsync(true, delegate(bool found, UpdateInfo update, string error)
+            {
+                _msgWindow.BeginInvoke(new Action(delegate
+                {
+                    if (found && update != null)
+                    {
+                        _hasUpdateBadge = true;
+                        UpdateTrayIcon();
+                        UpdateTrayTooltip();
+                        UpdateManager.PromptAndInstallUpdate(update, _flyout);
+                    }
+                    else if (!string.IsNullOrEmpty(error))
+                    {
+                        MessageBox.Show("Could not connect to GitHub to check for updates: " + error, "Check for Updates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                    else
+                    {
+                        MessageBox.Show("You are running the latest version of LumaTray (v" + UpdateManager.CurrentVersion.ToString(3) + ")!", "LumaTray", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                }));
+            });
+        }
+
         private void OnBrightnessChanged(MonitorInfo monitor, int brightness)
         {
             UpdateTrayTooltip();
@@ -177,6 +309,12 @@ namespace LumaTray
 
         private void UpdateTrayTooltip()
         {
+            if (_hasUpdateBadge && UpdateManager.AvailableUpdate != null)
+            {
+                _trayIcon.Text = "LumaTray (Update: " + UpdateManager.AvailableUpdate.VersionTag + ")";
+                return;
+            }
+
             var monitors = _manager.GetMonitors();
             if (monitors.Count == 0)
             {
@@ -287,13 +425,7 @@ namespace LumaTray
         {
             ThemeManager.ReloadTheme();
             _flyout.ApplyTheme();
-            Icon old = _currentTrayIcon;
-            _currentTrayIcon = CreateTrayIcon();
-            _trayIcon.Icon = _currentTrayIcon;
-            if (old != null)
-            {
-                try { old.Dispose(); } catch { }
-            }
+            UpdateTrayIcon();
         }
 
         private bool IsStartupEnabled()
@@ -341,6 +473,7 @@ namespace LumaTray
 
         private void ExitApp()
         {
+            UpdateManager.UpdateFound -= OnUpdateFound;
             UnregisterHotkeys();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();

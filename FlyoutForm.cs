@@ -17,6 +17,7 @@ namespace LumaTray
         private readonly Label _tipLabel;
         private readonly ModernIconButton _btnLink;
         private readonly ModernIconButton _btnSettings;
+        private readonly ModernIconButton _btnUpdate;
         private readonly List<MonitorRowCard> _cards = new List<MonitorRowCard>();
         private readonly Timer _scrollAnimTimer;
 
@@ -113,8 +114,31 @@ namespace LumaTray
                 IsLinked = !IsLinked;
             };
 
+            _btnUpdate = new ModernIconButton
+            {
+                Text = "⬆",
+                Size = new Size(22, 22),
+                Location = new Point(Width - 84, 6),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+                Visible = UpdateManager.HasUpdate
+            };
+            _btnUpdate.Click += delegate
+            {
+                if (UpdateManager.AvailableUpdate != null)
+                {
+                    UpdateManager.PromptAndInstallUpdate(UpdateManager.AvailableUpdate, this);
+                }
+            };
+
+            ToolTip tt = new ToolTip();
+            tt.SetToolTip(_btnUpdate, "Update available! Click to install");
+            tt.SetToolTip(_btnLink, "Link display brightness sliders");
+            tt.SetToolTip(_btnSettings, "Settings & menu");
+
             headerPanel.Controls.Add(_titleLabel);
             headerPanel.Controls.Add(_countBadge);
+            headerPanel.Controls.Add(_btnUpdate);
             headerPanel.Controls.Add(_btnLink);
             headerPanel.Controls.Add(_btnSettings);
 
@@ -174,7 +198,23 @@ namespace LumaTray
             _cardsContainer.MouseWheel += (s, e) => HandleFlyoutMouseWheel(e);
 
             _manager.MonitorsRefreshed += OnMonitorsRefreshed;
+            UpdateManager.UpdateFound += OnUpdateFound;
             BuildMonitorCards();
+        }
+
+        private void OnUpdateFound(UpdateInfo info)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<UpdateInfo>(OnUpdateFound), info);
+                return;
+            }
+            if (_btnUpdate != null)
+            {
+                _btnUpdate.Visible = true;
+                _btnUpdate.IsActive = true;
+                _btnUpdate.Invalidate();
+            }
         }
 
         public void ApplyTheme()
@@ -598,6 +638,7 @@ namespace LumaTray
                     _scrollAnimTimer.Stop();
                     _scrollAnimTimer.Dispose();
                 }
+                UpdateManager.UpdateFound -= OnUpdateFound;
                 foreach (var card in _cards)
                 {
                     card.Dispose();

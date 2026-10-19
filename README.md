@@ -41,6 +41,12 @@ I built this because I got fed up with Twinkle Tray sucking up 200 MB of RAM jus
   - Shows a sleek mini floating OSD pill at the bottom center of the screen (never steals focus from games or apps).
 - **Link All Displays (🔗)**:
   - One-click toggle in the header to adjust all your monitors in lockstep.
+- **Smart Auto-Updates & Notification Dot**:
+  - Automatically checks GitHub releases in the background (toggleable).
+  - Shows a tiny blue notification blob on the tray icon and an update button in the flyout header when a new version is available.
+  - Seamless 1-click update: downloads, swaps, and restarts in 1 second.
+- **Brightness Memory**:
+  - Automatically remembers and restores your exact brightness levels across reboots and updates.
 - **Start with Windows**:
   - Simple 1-click toggle directly in the tray right-click menu.
 

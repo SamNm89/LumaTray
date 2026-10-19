@@ -68,6 +68,7 @@ namespace LumaTray
             if (target > (int)monitor.MaxBrightness) target = (int)monitor.MaxBrightness;
 
             monitor.CurrentBrightness = target;
+            SettingsManager.SaveBrightness(monitor.FriendlyName, target);
 
             lock (_workQueue)
             {
@@ -220,7 +221,20 @@ namespace LumaTray
                                     : "Display " + displayIndex;
                             }
 
-                            // Keep monitor visible even if initial read timed out (default 50%)
+                            if (readOk)
+                            {
+                                SettingsManager.SaveBrightness(name, (int)curr);
+                            }
+                            else
+                            {
+                                int savedBrightness;
+                                if (SettingsManager.TryGetBrightness(name, out savedBrightness))
+                                {
+                                    curr = (uint)savedBrightness;
+                                }
+                            }
+
+                            // Keep monitor visible even if initial read timed out
                             newMonitors.Add(new MonitorInfo
                             {
                                 Id = "DDC_" + displayIndex + "_" + i,
@@ -423,6 +437,10 @@ namespace LumaTray
             if (_workerThread != null && _workerThread.IsAlive)
             {
                 _workerThread.Join(500);
+            }
+            lock (_lock)
+            {
+                SettingsManager.SaveAllBrightness(_monitors);
             }
             CleanupPhysicalHandles();
             _workSignal.Close();
