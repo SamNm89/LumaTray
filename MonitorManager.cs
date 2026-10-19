@@ -68,7 +68,6 @@ namespace LumaTray
             if (target > (int)monitor.MaxBrightness) target = (int)monitor.MaxBrightness;
 
             monitor.CurrentBrightness = target;
-            SettingsManager.SaveBrightness(monitor.FriendlyName, target);
 
             lock (_workQueue)
             {
@@ -126,6 +125,16 @@ namespace LumaTray
                                 NativeMethods.SetMonitorBrightness(mon.PhysicalHandle, (uint)val);
                             }
                         }
+
+                        // Debounced persistence runs on background worker thread
+                        if (!string.IsNullOrEmpty(mon.Id))
+                        {
+                            SettingsManager.SaveBrightness(mon.Id, val);
+                        }
+                        if (!string.IsNullOrEmpty(mon.FriendlyName))
+                        {
+                            SettingsManager.SaveBrightness(mon.FriendlyName, val);
+                        }
                     }
                     catch { }
                 }
@@ -180,7 +189,8 @@ namespace LumaTray
                 info.cbSize = Marshal.SizeOf(typeof(NativeMethods.MONITORINFOEX));
                 NativeMethods.GetMonitorInfo(hMon, ref info);
 
-                string friendlyName = GetFriendlyNameFromDevice(info.szDevice);
+                string friendlyName, hardwareId, serial;
+                GetDeviceInfoFromDevice(info.szDevice, out friendlyName, out hardwareId, out serial);
 
                 uint count = 0;
                 if (NativeMethods.GetNumberOfPhysicalMonitorsFromHMONITOR(hMon, out count) && count > 0)
@@ -221,14 +231,25 @@ namespace LumaTray
                                     : "Display " + displayIndex;
                             }
 
+                            // Generate unique hardware key (EDID serial > PNP hardware ID > device index)
+                            string uniqueId;
+                            if (!string.IsNullOrEmpty(serial))
+                                uniqueId = name + "_" + serial;
+                            else if (!string.IsNullOrEmpty(hardwareId))
+                                uniqueId = hardwareId + "_" + i;
+                            else
+                                uniqueId = info.szDevice + "_" + displayIndex + "_" + i;
+
                             if (readOk)
                             {
+                                SettingsManager.SaveBrightness(uniqueId, (int)curr);
                                 SettingsManager.SaveBrightness(name, (int)curr);
                             }
                             else
                             {
                                 int savedBrightness;
-                                if (SettingsManager.TryGetBrightness(name, out savedBrightness))
+                                if (SettingsManager.TryGetBrightness(uniqueId, out savedBrightness) ||
+                                    SettingsManager.TryGetBrightness(name, out savedBrightness))
                                 {
                                     curr = (uint)savedBrightness;
                                 }
@@ -237,7 +258,7 @@ namespace LumaTray
                             // Keep monitor visible even if initial read timed out
                             newMonitors.Add(new MonitorInfo
                             {
-                                Id = "DDC_" + displayIndex + "_" + i,
+                                Id = uniqueId,
                                 FriendlyName = name,
                                 DeviceName = info.szDevice,
                                 IsWmi = false,
@@ -274,9 +295,22 @@ namespace LumaTray
                                 if (parts.Length > 1) cleanName = parts[1];
                             }
 
+                            string wmiId = "WMI_" + instanceName;
+                            int savedBrightness;
+                            if (SettingsManager.TryGetBrightness(wmiId, out savedBrightness) ||
+                                SettingsManager.TryGetBrightness(cleanName, out savedBrightness))
+                            {
+                                curr = savedBrightness;
+                            }
+                            else
+                            {
+                                SettingsManager.SaveBrightness(wmiId, curr);
+                                SettingsManager.SaveBrightness(cleanName, curr);
+                            }
+
                             newMonitors.Add(new MonitorInfo
                             {
-                                Id = "WMI_" + instanceName,
+                                Id = wmiId,
                                 FriendlyName = cleanName,
                                 DeviceName = "Built-in Screen",
                                 IsWmi = true,
@@ -352,20 +386,29 @@ namespace LumaTray
             catch { }
         }
 
-        private string GetFriendlyNameFromDevice(string deviceName)
+        private void GetDeviceInfoFromDevice(string deviceName, out string friendlyName, out string hardwareId, out string serial)
         {
+            friendlyName = null;
+            hardwareId = null;
+            serial = null;
+
             NativeMethods.DISPLAY_DEVICE dev = new NativeMethods.DISPLAY_DEVICE();
             dev.cb = Marshal.SizeOf(typeof(NativeMethods.DISPLAY_DEVICE));
 
             if (NativeMethods.EnumDisplayDevices(deviceName, 0, ref dev, 0))
             {
-                string[] parts = dev.DeviceID.Split('\\');
+                if (!string.IsNullOrEmpty(dev.DeviceID))
+                {
+                    hardwareId = dev.DeviceID;
+                }
+
+                string[] parts = (dev.DeviceID ?? "").Split('\\');
                 if (parts.Length >= 2)
                 {
-                    string hardwareId = parts[1];
+                    string hwId = parts[1];
                     try
                     {
-                        using (RegistryKey baseKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\DISPLAY\" + hardwareId))
+                        using (RegistryKey baseKey = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Enum\DISPLAY\" + hwId))
                         {
                             if (baseKey != null)
                             {
@@ -378,9 +421,14 @@ namespace LumaTray
                                             byte[] edid = devParam.GetValue("EDID") as byte[];
                                             if (edid != null && edid.Length >= 128)
                                             {
-                                                string edidName = ParseEdidName(edid);
-                                                if (!string.IsNullOrEmpty(edidName))
-                                                    return edidName;
+                                                if (string.IsNullOrEmpty(friendlyName))
+                                                {
+                                                    friendlyName = ParseEdidName(edid);
+                                                }
+                                                if (string.IsNullOrEmpty(serial))
+                                                {
+                                                    serial = ParseEdidSerial(edid);
+                                                }
                                             }
                                         }
                                     }
@@ -390,10 +438,11 @@ namespace LumaTray
                     }
                     catch { }
                 }
-                if (!string.IsNullOrEmpty(dev.DeviceString) && dev.DeviceString != "Generic PnP Monitor")
-                    return dev.DeviceString;
+                if (string.IsNullOrEmpty(friendlyName) && !string.IsNullOrEmpty(dev.DeviceString) && dev.DeviceString != "Generic PnP Monitor")
+                {
+                    friendlyName = dev.DeviceString;
+                }
             }
-            return null;
         }
 
         private static string ParseEdidName(byte[] edid)
@@ -408,6 +457,25 @@ namespace LumaTray
                         string name = Encoding.ASCII.GetString(edid, off + 5, 13).Trim('\0', ' ', '\r', '\n');
                         if (!string.IsNullOrEmpty(name))
                             return name;
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static string ParseEdidSerial(byte[] edid)
+        {
+            if (edid == null || edid.Length < 128) return null;
+            int[] offsets = new int[] { 54, 72, 90, 108 };
+            foreach (int off in offsets)
+            {
+                if (off + 18 <= edid.Length)
+                {
+                    if (edid[off] == 0 && edid[off + 1] == 0 && edid[off + 2] == 0 && edid[off + 3] == 0xFF)
+                    {
+                        string serial = Encoding.ASCII.GetString(edid, off + 5, 13).Trim('\0', ' ', '\r', '\n');
+                        if (!string.IsNullOrEmpty(serial))
+                            return serial;
                     }
                 }
             }

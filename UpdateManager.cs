@@ -3,12 +3,38 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
 namespace LumaTray
 {
+    public class TimeoutWebClient : WebClient
+    {
+        public int TimeoutMs { get; set; }
+
+        public TimeoutWebClient(int timeoutMs = 15000)
+        {
+            TimeoutMs = timeoutMs;
+        }
+
+        protected override WebRequest GetWebRequest(Uri uri)
+        {
+            WebRequest w = base.GetWebRequest(uri);
+            if (w != null)
+            {
+                w.Timeout = TimeoutMs;
+                if (w is HttpWebRequest)
+                {
+                    ((HttpWebRequest)w).ReadWriteTimeout = TimeoutMs;
+                }
+            }
+            return w;
+        }
+    }
+
     public class UpdateInfo
     {
         public string VersionTag { get; set; }
@@ -17,6 +43,8 @@ namespace LumaTray
         public string PatchNotes { get; set; }
         public string DownloadUrl { get; set; }
         public string HtmlUrl { get; set; }
+        public string ExpectedSha256 { get; set; }
+        public string ChecksumUrl { get; set; }
     }
 
     public static class UpdateManager
@@ -24,8 +52,15 @@ namespace LumaTray
         private const string GitHubApiLatest = "https://api.github.com/repos/SamNm89/LumaTray/releases/latest";
 
         public static event Action<UpdateInfo> UpdateFound;
-        public static UpdateInfo AvailableUpdate { get; private set; }
-        public static bool HasUpdate { get { return AvailableUpdate != null; } }
+
+        private static volatile UpdateInfo _availableUpdate;
+        public static UpdateInfo AvailableUpdate
+        {
+            get { return _availableUpdate; }
+            private set { _availableUpdate = value; }
+        }
+
+        public static bool HasUpdate { get { return _availableUpdate != null; } }
 
         public static Version CurrentVersion
         {
@@ -45,7 +80,7 @@ namespace LumaTray
                     ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
                     string json;
 
-                    using (WebClient client = new WebClient())
+                    using (var client = new TimeoutWebClient(15000))
                     {
                         client.Headers.Add("User-Agent", "LumaTray-App");
                         json = client.DownloadString(GitHubApiLatest);
@@ -55,6 +90,7 @@ namespace LumaTray
                     string name = MatchValue(json, "\"name\"\\s*:\\s*\"([^\"]+)\"");
                     string htmlUrl = MatchValue(json, "\"html_url\"\\s*:\\s*\"([^\"]+)\"");
                     string downloadUrl = MatchValue(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]*LumaTray\\.exe)\"");
+                    string checksumUrl = MatchValue(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]*(?:\\.sha256|checksums\\.txt))\"");
                     string rawBody = MatchValue(json, "\"body\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
 
                     string patchNotes = UnescapeString(rawBody);
@@ -62,6 +98,8 @@ namespace LumaTray
                     {
                         SettingsManager.CachedPatchNotes = patchNotes;
                     }
+
+                    string expectedSha = MatchValue(rawBody, "(?i)(?:sha[-_]?256|hash)\\s*[:=]\\s*([A-Fa-f0-9]{64})");
 
                     string cleanTag = (tag ?? "").Trim().TrimStart('v', 'V');
                     Version remoteVersion;
@@ -79,7 +117,9 @@ namespace LumaTray
                                 ReleaseName = string.IsNullOrEmpty(name) ? tag : name,
                                 PatchNotes = patchNotes,
                                 DownloadUrl = downloadUrl,
-                                HtmlUrl = htmlUrl
+                                HtmlUrl = htmlUrl,
+                                ExpectedSha256 = expectedSha,
+                                ChecksumUrl = checksumUrl
                             };
 
                             AvailableUpdate = info;
@@ -178,8 +218,8 @@ namespace LumaTray
                 MaximizeBox = false,
                 MinimizeBox = false,
                 ShowInTaskbar = true,
-                Width = 320,
-                Height = 110,
+                Width = 340,
+                Height = 145,
                 TopMost = true
             };
 
@@ -193,15 +233,40 @@ namespace LumaTray
 
             ProgressBar pb = new ProgressBar
             {
-                Location = new System.Drawing.Point(16, 36),
-                Width = 272,
+                Location = new System.Drawing.Point(16, 38),
+                Width = 292,
                 Height = 18,
                 Style = ProgressBarStyle.Marquee,
                 MarqueeAnimationSpeed = 30
             };
 
+            Button btnCancel = new Button
+            {
+                Text = "Cancel",
+                Location = new System.Drawing.Point(228, 68),
+                Width = 80,
+                Height = 26,
+                DialogResult = DialogResult.Cancel
+            };
+
             progressForm.Controls.Add(lblStatus);
             progressForm.Controls.Add(pb);
+            progressForm.Controls.Add(btnCancel);
+            progressForm.CancelButton = btnCancel;
+
+            bool isCancelled = false;
+            TimeoutWebClient activeClient = null;
+
+            btnCancel.Click += delegate
+            {
+                isCancelled = true;
+                if (activeClient != null)
+                {
+                    try { activeClient.CancelAsync(); } catch { }
+                }
+                progressForm.Close();
+            };
+
             progressForm.Show();
 
             ThreadPool.QueueUserWorkItem(delegate
@@ -209,10 +274,18 @@ namespace LumaTray
                 try
                 {
                     ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-                    using (WebClient wc = new WebClient())
+
+                    using (var wc = new TimeoutWebClient(30000))
                     {
+                        activeClient = wc;
                         wc.Headers.Add("User-Agent", "LumaTray-App");
                         wc.DownloadFile(update.DownloadUrl, tempExe);
+                    }
+
+                    if (isCancelled)
+                    {
+                        try { if (File.Exists(tempExe)) File.Delete(tempExe); } catch { }
+                        return;
                     }
 
                     FileInfo fi = new FileInfo(tempExe);
@@ -221,10 +294,68 @@ namespace LumaTray
                         throw new Exception("Downloaded file is incomplete or invalid.");
                     }
 
-                    // Prepare in-place swap command
+                    // 1. Basic PE Executable validation (must start with 'MZ')
+                    using (FileStream fs = File.OpenRead(tempExe))
+                    {
+                        byte[] header = new byte[2];
+                        int read = fs.Read(header, 0, 2);
+                        if (read < 2 || header[0] != 'M' || header[1] != 'Z')
+                        {
+                            throw new Exception("Security error: Downloaded binary is not a valid Windows executable.");
+                        }
+                    }
+
+                    // 2. Fetch checksum file if not present in release body
+                    string expectedSha = update.ExpectedSha256;
+                    if (string.IsNullOrEmpty(expectedSha) && !string.IsNullOrEmpty(update.ChecksumUrl))
+                    {
+                        try
+                        {
+                            using (var cClient = new TimeoutWebClient(15000))
+                            {
+                                cClient.Headers.Add("User-Agent", "LumaTray-App");
+                                string checksumContent = cClient.DownloadString(update.ChecksumUrl);
+                                string match = MatchValue(checksumContent, "([A-Fa-f0-9]{64})");
+                                if (!string.IsNullOrEmpty(match))
+                                {
+                                    expectedSha = match;
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+
+                    // 3. Cryptographic SHA-256 verification
+                    if (!string.IsNullOrEmpty(expectedSha))
+                    {
+                        string actualSha;
+                        using (var sha = SHA256.Create())
+                        using (var fs = File.OpenRead(tempExe))
+                        {
+                            byte[] hash = sha.ComputeHash(fs);
+                            StringBuilder sb = new StringBuilder();
+                            foreach (byte b in hash) sb.Append(b.ToString("x2"));
+                            actualSha = sb.ToString();
+                        }
+
+                        if (!string.Equals(actualSha, expectedSha, StringComparison.OrdinalIgnoreCase))
+                        {
+                            try { File.Delete(tempExe); } catch { }
+                            throw new Exception("Security verification failed: Downloaded file checksum does not match release SHA-256!\n\nExpected: " + expectedSha + "\nActual:   " + actualSha);
+                        }
+                    }
+
+                    // 4. Resilient in-place swap command with retry and failure notification
                     string currentExe = Application.ExecutablePath;
                     string cmdArgs = string.Format(
-                        "/c timeout /t 1 /nobreak > NUL & move /y \"{0}\" \"{1}\" & start \"\" \"{1}\"",
+                        "/c timeout /t 1 /nobreak > NUL & " +
+                        "(for /l %i in (1,1,5) do @if exist \"{0}\" (move /y \"{0}\" \"{1}\" > NUL 2>&1 & timeout /t 1 /nobreak > NUL)) & " +
+                        "if exist \"{0}\" (" +
+                        "mshta \"vbscript:MsgBox(\"\"LumaTray update could not replace the executable (access denied or file locked). Please update manually.\"\",16,\"\"Update Failed\"\")(window.close)\" & " +
+                        "start \"\" \"{1}\"" +
+                        ") else (" +
+                        "start \"\" \"{1}\"" +
+                        ")",
                         tempExe, currentExe);
 
                     ProcessStartInfo psi = new ProcessStartInfo
@@ -246,10 +377,12 @@ namespace LumaTray
                 }
                 catch (Exception ex)
                 {
+                    if (isCancelled) return;
+
                     progressForm.BeginInvoke(new Action(delegate
                     {
                         progressForm.Close();
-                        MessageBox.Show("Could not download update: " + ex.Message + "\n\nOpening release page...", "Update Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show("Could not complete update: " + ex.Message + "\n\nOpening release page...", "Update Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         try { Process.Start(update.HtmlUrl); } catch { }
                     }));
                 }

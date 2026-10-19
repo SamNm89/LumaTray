@@ -117,14 +117,28 @@ namespace LumaTray
         {
             get
             {
-                return "Recent Patch Notes (v1.0.1):\n" +
-                       "• Dynamic Window Height: Fits up to 2 screens natively without scrollbars.\n" +
-                       "• Scrollbar-Free Wheel Scrolling: Smooth mouse wheel navigation for 3+ displays.\n" +
-                       "• Fully Asynchronous Engine: Non-blocking DDC/CI & WMI hardware discovery.\n" +
-                       "• Zero-Leak Architecture: Clean WMI COM wrapper disposal and HWND lifecycle.\n" +
-                       "• Per-Monitor V2 DPI Awareness: Pin-sharp rendering on mixed-DPI screens.\n" +
-                       "• Brightness Persistence: Remembers your monitor brightness across updates.";
+                return "Recent Patch Notes (v1.0.2):\n" +
+                       "• Hardened Auto-Updater: SHA-256 checksum verification & resilient swap script.\n" +
+                       "• Debounced Brightness Persistence: Background thread saves with zero UI drag latency.\n" +
+                       "• Unique Monitor Hardware Keys: EDID serial & DeviceID tracking prevents multi-monitor collisions.\n" +
+                       "• Optimized Card Lifecycle: Skips UI card teardown when display configuration is unchanged.\n" +
+                       "• Network Timeout & Cancel: 15-second updater timeout with interactive cancel dialog.\n" +
+                       "• Dynamic Window Height & Wheel Scroll: Fits up to 2 screens natively and scrolls 3+.";
             }
+        }
+
+        public static string SanitizeKey(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return "Unknown";
+            System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            foreach (char c in key)
+            {
+                if (char.IsLetterOrDigit(c) || c == '-' || c == '_')
+                    sb.Append(c);
+                else
+                    sb.Append('_');
+            }
+            return sb.ToString();
         }
 
         public static void SaveBrightness(string monitorKey, int brightness)
@@ -136,7 +150,7 @@ namespace LumaTray
                 {
                     if (key != null)
                     {
-                        string safeName = monitorKey.Replace('\\', '_');
+                        string safeName = SanitizeKey(monitorKey);
                         key.SetValue(safeName, brightness, RegistryValueKind.DWord);
                     }
                 }
@@ -146,7 +160,7 @@ namespace LumaTray
 
         public static bool TryGetBrightness(string monitorKey, out int brightness)
         {
-            brightness = 50;
+            brightness = 0;
             if (string.IsNullOrEmpty(monitorKey)) return false;
             try
             {
@@ -154,7 +168,7 @@ namespace LumaTray
                 {
                     if (key != null)
                     {
-                        string safeName = monitorKey.Replace('\\', '_');
+                        string safeName = SanitizeKey(monitorKey);
                         object val = key.GetValue(safeName);
                         if (val != null)
                         {
@@ -173,10 +187,13 @@ namespace LumaTray
             if (monitors == null) return;
             foreach (var m in monitors)
             {
-                SaveBrightness(m.FriendlyName, m.CurrentBrightness);
                 if (!string.IsNullOrEmpty(m.Id))
                 {
                     SaveBrightness(m.Id, m.CurrentBrightness);
+                }
+                if (!string.IsNullOrEmpty(m.FriendlyName))
+                {
+                    SaveBrightness(m.FriendlyName, m.CurrentBrightness);
                 }
             }
         }

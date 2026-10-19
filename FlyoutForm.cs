@@ -274,10 +274,36 @@ namespace LumaTray
                 BeginInvoke(new Action(OnMonitorsRefreshed));
                 return;
             }
-            BuildMonitorCards();
-            if (Visible)
+
+            var currentMonitors = _manager.GetMonitors();
+            bool monitorSetChanged = false;
+            if (_cards.Count != currentMonitors.Count)
             {
-                PositionNearTray();
+                monitorSetChanged = true;
+            }
+            else
+            {
+                for (int i = 0; i < currentMonitors.Count; i++)
+                {
+                    if (_cards[i].Monitor == null || _cards[i].Monitor.Id != currentMonitors[i].Id)
+                    {
+                        monitorSetChanged = true;
+                        break;
+                    }
+                }
+            }
+
+            if (monitorSetChanged)
+            {
+                BuildMonitorCards();
+                if (Visible)
+                {
+                    PositionNearTray();
+                }
+            }
+            else
+            {
+                SyncCardsFromMonitors();
             }
         }
 
@@ -630,6 +656,7 @@ namespace LumaTray
             Hide();
             try
             {
+                SettingsManager.SaveAllBrightness(_manager.GetMonitors());
                 BufferedGraphicsManager.Current.Invalidate();
                 GC.Collect(1, GCCollectionMode.Optimized);
                 NativeMethods.EmptyWorkingSet(Process.GetCurrentProcess().Handle);
