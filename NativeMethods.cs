@@ -107,6 +107,11 @@ namespace LumaTray
         [DllImport("user32.dll")]
         public static extern bool SetProcessDPIAware();
 
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        public static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
+        public const string ShellTrayWndClass = "Shell_TrayWnd";
+
         // --- Hotkey API ---
         [DllImport("user32.dll")]
         public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);

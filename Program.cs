@@ -11,6 +11,35 @@ namespace LumaTray
         [STAThread]
         static void Main()
         {
+            StartupLog.Write("Main entered (process start -> Main: " + StartupLog.SinceProcessStartMs + " ms)");
+
+            // Exceptions on background threads (DDC/WMI/update workers) bypass
+            // Application.ThreadException and silently terminate the process.
+            AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+            {
+                StartupLog.Write("FATAL unhandled exception: " + e.ExceptionObject);
+            };
+
+            try
+            {
+                RunApp();
+            }
+            catch (Exception ex)
+            {
+                StartupLog.Write("FATAL exception in Main: " + ex);
+                try
+                {
+                    MessageBox.Show(
+                        "LumaTray could not start:\n" + ex.Message +
+                        "\n\nDetails were written to:\n" + StartupLog.FilePath,
+                        "LumaTray Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch { }
+            }
+        }
+
+        private static void RunApp()
+        {
             // Enable Per-Monitor V2 High DPI Awareness for crisp fonts & icons on mixed-DPI screens
             try
             {
@@ -31,9 +60,11 @@ namespace LumaTray
             if (!createdNew)
             {
                 // Already running
+                StartupLog.Write("another instance is already running, exiting");
                 MessageBox.Show("LumaTray is already running in your system tray.", "LumaTray", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
+            StartupLog.Write("single-instance mutex acquired");
 
             // Clean up any renamed .old executable from a previous update
             try
@@ -48,6 +79,7 @@ namespace LumaTray
 
             Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e)
             {
+                StartupLog.Write("unhandled UI-thread exception: " + e.Exception);
                 try
                 {
                     string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LumaTray");
@@ -58,7 +90,13 @@ namespace LumaTray
                 MessageBox.Show("An unexpected error occurred in LumaTray:\n" + e.Exception.Message, "LumaTray Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             };
 
-            Application.Run(new TrayApplicationContext());
+            StartupLog.Write("creating tray context");
+            TrayApplicationContext context = new TrayApplicationContext();
+            StartupLog.Write("tray context created, entering message loop");
+
+            Application.Run(context);
+
+            StartupLog.Write("message loop exited");
 
             // Release mutex on exit
             if (_appMutex != null)

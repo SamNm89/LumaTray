@@ -18,6 +18,9 @@ namespace LumaTray
 
         private Icon _currentTrayIcon;
         private bool _hasUpdateBadge = false;
+        private bool _exiting = false;
+        private int _trayIconRetriesLeft = 15;
+        private Timer _trayRetryTimer;
         private MenuItem _menuItemLink;
         private MenuItem _menuItemHotkeys;
         private MenuItem _menuItemStartup;
@@ -28,9 +31,32 @@ namespace LumaTray
 
         public TrayApplicationContext()
         {
+            StartupLog.Write("tray context: loading theme");
             ThemeManager.ReloadTheme();
 
+            // Message host Form must exist before MonitorManager starts so UiInvoker can
+            // marshal background scan events onto the UI thread without a startup race.
+            _msgWindow = new HotkeyMessageWindow(this);
+
+            StartupLog.Write("tray context: creating MonitorManager");
             _manager = new MonitorManager();
+            _manager.UiInvoker = delegate(Action action)
+            {
+                if (_exiting || _msgWindow.IsDisposed || !_msgWindow.IsHandleCreated) return;
+                try
+                {
+                    if (_msgWindow.InvokeRequired)
+                    {
+                        _msgWindow.BeginInvoke(action);
+                    }
+                    else
+                    {
+                        action();
+                    }
+                }
+                catch { }
+            };
+
             _flyout = new FlyoutForm(_manager);
             _osd = new OsdForm();
             _flyout.RequestSettings += ShowContextMenu;
@@ -38,9 +64,6 @@ namespace LumaTray
             _manager.BrightnessChanged += OnBrightnessChanged;
             _manager.MonitorsRefreshed += UpdateTrayTooltip;
             UpdateManager.UpdateFound += OnUpdateFound;
-
-            // Message host Form for Hotkeys, Display Changes, and Theme Changes
-            _msgWindow = new HotkeyMessageWindow(this);
 
             // Context Menu
             ContextMenu menu = new ContextMenu();
@@ -126,6 +149,7 @@ namespace LumaTray
             menu.MenuItems.Add(itemExit);
 
             // Initialize Tray Icon
+            StartupLog.Write("tray context: creating tray icon");
             _currentTrayIcon = CreateTrayIcon(false);
             _trayIcon = new NotifyIcon
             {
@@ -134,6 +158,8 @@ namespace LumaTray
                 Visible = true,
                 Text = "LumaTray"
             };
+            StartupLog.Write("tray context: tray icon visible");
+            EnsureTrayIconRegistered();
 
             _trayIcon.MouseClick += delegate(object sender, MouseEventArgs e)
             {
@@ -145,6 +171,7 @@ namespace LumaTray
 
             _menuItemHotkeys.Checked = RegisterHotkeys();
             UpdateTrayTooltip();
+            _manager.Start();
 
             // Initial memory trim once startup initialization and JIT compile settles
             Timer startupTrimTimer = new Timer { Interval = 1500 };
@@ -178,6 +205,57 @@ namespace LumaTray
                 }
             };
             updateTimer.Start();
+
+            StartupLog.Write("tray context: initialization complete");
+        }
+
+        /// <summary>
+        /// At logon the shell can still be building the notification area when the Run
+        /// key launches us, so the icon gets added to a taskbar that does not exist yet.
+        /// Wait until Shell_TrayWnd appears, then re-add the icon once it is ready.
+        /// </summary>
+        private void EnsureTrayIconRegistered(bool isRetry = false)
+        {
+            if (_exiting || _trayIcon == null) return;
+
+            if (NativeMethods.FindWindow(NativeMethods.ShellTrayWndClass, null) != IntPtr.Zero)
+            {
+                if (isRetry)
+                {
+                    StartupLog.Write("shell taskbar now present, re-adding tray icon");
+                    try
+                    {
+                        _trayIcon.Visible = false;
+                        _trayIcon.Visible = true;
+                    }
+                    catch { }
+                }
+                else
+                {
+                    StartupLog.Write("shell taskbar present, tray icon registered");
+                }
+                return;
+            }
+
+            if (_trayIconRetriesLeft-- <= 0)
+            {
+                StartupLog.Write("shell taskbar not found after retries, giving up");
+                return;
+            }
+
+            StartupLog.Write("shell taskbar not ready yet, waiting 2000 ms (retries left: " + _trayIconRetriesLeft + ")");
+            _trayRetryTimer = new Timer { Interval = 2000 };
+            _trayRetryTimer.Tick += delegate
+            {
+                if (_trayRetryTimer != null)
+                {
+                    _trayRetryTimer.Stop();
+                    _trayRetryTimer.Dispose();
+                    _trayRetryTimer = null;
+                }
+                EnsureTrayIconRegistered(true);
+            };
+            _trayRetryTimer.Start();
         }
 
         private Icon CreateTrayIcon(bool hasUpdateBadge)
@@ -335,6 +413,8 @@ namespace LumaTray
 
         private void UpdateTrayTooltip()
         {
+            if (_trayIcon == null) return;
+
             if (_hasUpdateBadge && UpdateManager.AvailableUpdate != null)
             {
                 _trayIcon.Text = "LumaTray (Update: " + UpdateManager.AvailableUpdate.VersionTag + ")";
@@ -344,7 +424,9 @@ namespace LumaTray
             var monitors = _manager.GetMonitors();
             if (monitors.Count == 0)
             {
-                _trayIcon.Text = "LumaTray\nNo displays detected";
+                // First DDC/WMI scan can still be running, or can fail while the display
+                // stack is coming up at logon. MonitorManager keeps retrying.
+                _trayIcon.Text = "LumaTray\nDetecting displays...";
             }
             else if (monitors.Count == 1)
             {
@@ -499,6 +581,20 @@ namespace LumaTray
 
         private void ExitApp()
         {
+            StartupLog.Write("exit requested from tray menu");
+            _exiting = true;
+            if (_trayRetryTimer != null)
+            {
+                try
+                {
+                    _trayRetryTimer.Stop();
+                    _trayRetryTimer.Dispose();
+                }
+                catch { }
+                _trayRetryTimer = null;
+            }
+            _manager.BrightnessChanged -= OnBrightnessChanged;
+            _manager.MonitorsRefreshed -= UpdateTrayTooltip;
             UpdateManager.UpdateFound -= OnUpdateFound;
             UnregisterHotkeys();
             _trayIcon.Visible = false;

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Management;
 using System.Runtime.InteropServices;
@@ -30,7 +31,7 @@ namespace LumaTray
         private readonly AutoResetEvent _workSignal = new AutoResetEvent(false);
         private readonly SynchronizationContext _syncContext;
         private Thread _workerThread;
-        private bool _running = true;
+        private volatile bool _running = true;
 
         private bool _isRefreshing = false;
         private bool _refreshQueued = false;
@@ -42,6 +43,17 @@ namespace LumaTray
         public event Action<MonitorInfo, int> BrightnessChanged;
         public event Action MonitorsRefreshed;
 
+        /// <summary>
+        /// Optional UI-thread marshaller supplied by the app once a window exists.
+        /// A SynchronizationContext cannot be captured in the constructor because
+        /// MonitorManager is created before any WinForms control.
+        /// </summary>
+        public Action<Action> UiInvoker { get; set; }
+
+        private int _initialRetriesLeft = 5;
+        private System.Threading.Timer _retryTimer;
+        private readonly object _retryLock = new object();
+
         public MonitorManager()
         {
             _syncContext = SynchronizationContext.Current;
@@ -51,7 +63,49 @@ namespace LumaTray
                 Name = "LumaTray_BrightnessWorker"
             };
             _workerThread.Start();
+        }
+
+        public void Start()
+        {
             RefreshMonitors();
+            ScheduleInitialRetry();
+        }
+
+        /// <summary>
+        /// At logon the display stack, DDC/CI and the WMI service can still be warming up,
+        /// which makes the first scan come back empty. Keep retrying with backoff so the
+        /// flyout fills in on its own instead of staying on "No displays detected".
+        /// </summary>
+        private void ScheduleInitialRetry()
+        {
+            lock (_retryLock)
+            {
+                if (_initialRetriesLeft <= 0 || !_running) return;
+
+                int attempt = 6 - _initialRetriesLeft;
+                _initialRetriesLeft--;
+
+                int delayMs = 1500 * (1 << (attempt - 1)); // 1.5s, 3s, 6s, 12s, 24s
+                if (_retryTimer != null)
+                {
+                    try { _retryTimer.Dispose(); } catch { }
+                    _retryTimer = null;
+                }
+
+                _retryTimer = new System.Threading.Timer(delegate(object state)
+                {
+                    try
+                    {
+                        if (!_running) return;
+                        if (GetMonitors().Count > 0) return;
+
+                        StartupLog.Write("display scan: retry " + attempt + " (after " + delayMs + " ms)");
+                        RefreshMonitors();
+                        ScheduleInitialRetry();
+                    }
+                    catch { }
+                }, null, delayMs, Timeout.Infinite);
+            }
         }
 
         public List<MonitorInfo> GetMonitors()
@@ -174,6 +228,7 @@ namespace LumaTray
 
         private void PerformHardwareScan()
         {
+            Stopwatch scanWatch = Stopwatch.StartNew();
             var newMonitors = new List<MonitorInfo>();
             var newHandles = new List<KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>>();
 
@@ -262,6 +317,10 @@ namespace LumaTray
                                 MaxBrightness = max > 0 ? max : 100,
                                 CurrentBrightness = (int)curr
                             });
+
+                            StartupLog.Write("display scan: '" + name + "' ddc read " +
+                                (readOk ? "ok" : "FAILED (saved value used)") +
+                                ", elapsed " + scanWatch.ElapsedMilliseconds + " ms");
                         }
                     }
                 }
@@ -318,7 +377,10 @@ namespace LumaTray
                     }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                StartupLog.Write("display scan: WMI query unavailable (normal on desktops without an internal panel): " + ex.Message);
+            }
 
             // 3. Atomically update monitors and physical handles
             List<KeyValuePair<uint, NativeMethods.PHYSICAL_MONITOR[]>> oldHandles;
@@ -376,7 +438,17 @@ namespace LumaTray
             }
 
             // 5. Notify UI thread via SynchronizationContext
-            if (_syncContext != null)
+            StartupLog.Write("display scan: finished in " + scanWatch.ElapsedMilliseconds +
+                " ms, " + newMonitors.Count + " display(s)");
+
+            if (UiInvoker != null)
+            {
+                UiInvoker(delegate
+                {
+                    if (MonitorsRefreshed != null) MonitorsRefreshed();
+                });
+            }
+            else if (_syncContext != null)
             {
                 _syncContext.Post(delegate
                 {
@@ -540,6 +612,14 @@ namespace LumaTray
         public void Dispose()
         {
             _running = false;
+            lock (_retryLock)
+            {
+                if (_retryTimer != null)
+                {
+                    try { _retryTimer.Dispose(); } catch { }
+                    _retryTimer = null;
+                }
+            }
             _workSignal.Set();
             if (_workerThread != null && _workerThread.IsAlive)
             {
